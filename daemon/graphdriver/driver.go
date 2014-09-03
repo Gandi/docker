@@ -78,6 +78,7 @@ var (
 	priority = []string{
 		"aufs",
 		"btrfs",
+		"zfs",
 		"devicemapper",
 		"vfs",
 		// experimental, has to be enabled manually for now
