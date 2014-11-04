@@ -15,6 +15,7 @@ type State struct {
 	Restarting bool
 	Pid        int
 	ExitCode   int
+	Error      string // contains last known error when starting the container
 	StartedAt  time.Time
 	FinishedAt time.Time
 	waitChan   chan struct{}
@@ -44,6 +45,20 @@ func (s *State) String() string {
 	}
 
 	return fmt.Sprintf("Exited (%d) %s ago", s.ExitCode, units.HumanDuration(time.Now().UTC().Sub(s.FinishedAt)))
+}
+
+// StateString returns a single string to describe state
+func (s *State) StateString() string {
+	if s.Running {
+		if s.Paused {
+			return "paused"
+		}
+		if s.Restarting {
+			return "restarting"
+		}
+		return "running"
+	}
+	return "exited"
 }
 
 func wait(waitChan <-chan struct{}, timeout time.Duration) error {
@@ -123,6 +138,7 @@ func (s *State) SetRunning(pid int) {
 }
 
 func (s *State) setRunning(pid int) {
+	s.Error = ""
 	s.Running = true
 	s.Paused = false
 	s.Restarting = false
@@ -163,6 +179,13 @@ func (s *State) SetRestarting(exitCode int) {
 	close(s.waitChan) // fire waiters for stop
 	s.waitChan = make(chan struct{})
 	s.Unlock()
+}
+
+// setError sets the container's error state. This is useful when we want to
+// know the error that occurred when container transits to another state
+// when inspecting it
+func (s *State) setError(err error) {
+	s.Error = err.Error()
 }
 
 func (s *State) IsRestarting() bool {

@@ -7,10 +7,10 @@ import (
 	"os"
 	"path"
 
-	"github.com/docker/docker/archive"
+	log "github.com/Sirupsen/logrus"
 	"github.com/docker/docker/engine"
 	"github.com/docker/docker/image"
-	"github.com/docker/docker/pkg/log"
+	"github.com/docker/docker/pkg/archive"
 )
 
 // Loads a set of images into the repository. This is the complementary of ImageExport.
@@ -118,7 +118,7 @@ func (s *TagStore) recursiveLoad(eng *engine.Engine, address, tmpImageDir string
 				}
 			}
 		}
-		if err := s.graph.Register(img, imageJson, layer); err != nil {
+		if err := s.graph.Register(img, layer); err != nil {
 			return err
 		}
 	}

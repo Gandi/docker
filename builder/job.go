@@ -5,11 +5,11 @@ import (
 	"io/ioutil"
 	"os"
 	"os/exec"
-	"strings"
 
-	"github.com/docker/docker/archive"
 	"github.com/docker/docker/daemon"
 	"github.com/docker/docker/engine"
+	"github.com/docker/docker/graph"
+	"github.com/docker/docker/pkg/archive"
 	"github.com/docker/docker/pkg/parsers"
 	"github.com/docker/docker/registry"
 	"github.com/docker/docker/utils"
@@ -42,12 +42,23 @@ func (b *BuilderJob) CmdBuild(job *engine.Job) engine.Status {
 	)
 	job.GetenvJson("authConfig", authConfig)
 	job.GetenvJson("configFile", configFile)
+
 	repoName, tag = parsers.ParseRepositoryTag(repoName)
+	if repoName != "" {
+		if _, _, err := registry.ResolveRepositoryName(repoName); err != nil {
+			return job.Error(err)
+		}
+		if len(tag) > 0 {
+			if err := graph.ValidateTagName(tag); err != nil {
+				return job.Error(err)
+			}
+		}
+	}
 
 	if remoteURL == "" {
 		context = ioutil.NopCloser(job.Stdin)
 	} else if utils.IsGIT(remoteURL) {
-		if !strings.HasPrefix(remoteURL, "git://") {
+		if !utils.ValidGitTransport(remoteURL) {
 			remoteURL = "https://" + remoteURL
 		}
 		root, err := ioutil.TempDir("", "docker-build-git")
@@ -112,7 +123,7 @@ func (b *BuilderJob) CmdBuild(job *engine.Job) engine.Status {
 	}
 
 	if repoName != "" {
-		b.Daemon.Repositories().Set(repoName, tag, id, false)
+		b.Daemon.Repositories().Set(repoName, tag, id, true)
 	}
 	return engine.StatusOK
 }

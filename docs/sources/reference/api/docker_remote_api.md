@@ -4,9 +4,14 @@ page_keywords: API, Docker, rcli, REST, documentation
 
 # Docker Remote API
 
- - The Remote API is replacing `rcli`.
  - By default the Docker daemon listens on `unix:///var/run/docker.sock`
    and the client must have `root` access to interact with the daemon.
+ - If the Docker daemon is set to use an encrypted TCP socket (`--tls`,
+   or `--tlsverify`) as with Boot2Docker 1.3.0, then you need to add extra
+   parameters to `curl` or `wget` when making test API requests:
+   `curl --insecure --cert ~/.docker/cert.pem --key ~/.docker/key.pem https://boot2docker:2376/images/json`
+   or 
+   `wget --no-check-certificate --certificate=$DOCKER_CERT_PATH/cert.pem --private-key=$DOCKER_CERT_PATH/key.pem https://boot2docker:2376/images/json -O - -q`
  - If a group named `docker` exists on your system, docker will apply
    ownership of the socket to the group.
  - The API tends to be REST, but for some complex commands, like attach
@@ -15,16 +20,41 @@ page_keywords: API, Docker, rcli, REST, documentation
  - Since API version 1.2, the auth configuration is now handled client
    side, so the client has to send the `authConfig` as a `POST` in `/images/(name)/push`.
  - authConfig, set as the `X-Registry-Auth` header, is currently a Base64
-   encoded (JSON) string with credentials:
-   `{'username': string, 'password': string, 'email': string, 'serveraddress' : string}`
+   encoded (JSON) string with the following structure:
+   `{"username": "string", "password": "string", "email": "string",
+   "serveraddress" : "string", "auth": ""}`. Notice that `auth` is to be left
+   empty, `serveraddress` is a domain/ip without protocol, and that double
+   quotes (instead of single ones) are required.
+ - The Remote API uses an open schema model.  In this model, unknown 
+   properties in incoming messages will be ignored.
+   Client applications need to take this into account to ensure
+   they will not break when talking to newer Docker daemons.
 
-The current version of the API is v1.15
+The current version of the API is v1.16
 
 Calling `/info` is the same as calling
-`/v1.15/info`.
+`/v1.16/info`.
 
 You can still call an old version of the API using
-`/v1.14/info`.
+`/v1.15/info`.
+
+## v1.16
+
+### Full Documentation
+
+[*Docker Remote API v1.16*](/reference/api/docker_remote_api_v1.16/)
+
+### What's new
+
+`GET /info`
+
+**New!**
+`info` now returns the number of CPUs available on the machine (`NCPU`) and
+total memory available (`MemTotal`).
+
+`POST /containers/create`
+**New!**
+You can set the new container's MAC address explicitly.
 
 ## v1.15
 

@@ -25,8 +25,9 @@ import (
 	"time"
 	"unsafe"
 
+	log "github.com/Sirupsen/logrus"
+	"github.com/docker/docker/pkg/archive"
 	"github.com/docker/docker/daemon/graphdriver"
-	"github.com/docker/docker/pkg/log"
 	"github.com/docker/docker/pkg/parsers"
 )
 
@@ -190,6 +191,10 @@ func volumeCreate(zfs *C.libzfs_handle_t, id, mountpoint string) error {
 
 	C.nvlist_add_string(props, C.zfs_prop_to_name(C.ZFS_PROP_MOUNTPOINT), c_mountpoint)
 
+	if C.zfs_create_ancestors(zfs, c_id) != 0 {
+		return fmt.Errorf("Couldn't create zfs ancestors for %s", id)
+	}
+
 	if C.zfs_create(zfs, c_id, C.ZFS_TYPE_FILESYSTEM, props) != 0 {
 		return fmt.Errorf("Couldn't create zfs %s", id)
 	}
@@ -206,35 +211,45 @@ func volumeCreate(zfs *C.libzfs_handle_t, id, mountpoint string) error {
 	return nil
 }
 
-func volumeSnapshot(zfs *C.libzfs_handle_t, id string) (string, string, error) {
+func volumeSnapshot(zfs *C.libzfs_handle_t, snapshotPath string) error {
 	var props *C.nvlist_t
 	var nvl *C.nvlist_t
 
 	if C.nvlist_alloc(&props, C.NV_UNIQUE_NAME, 0) != 0 {
-		return "", "", fmt.Errorf("Couldn't allocate memory for snapshot properties")
+		return fmt.Errorf("Couldn't allocate memory for snapshot properties")
 	}
 	defer C.nvlist_free(props)
 
 	if C.nvlist_alloc(&nvl, C.NV_UNIQUE_NAME, 0) != 0 {
-		return "", "", fmt.Errorf("Couldn't allocate memory for snapshot list")
+		return fmt.Errorf("Couldn't allocate memory for snapshot list")
 	}
 	defer C.nvlist_free(nvl)
 
-	snapshotName := fmt.Sprintf("%d", time.Now().Nanosecond())
-	snapshotPath := id + "@" + snapshotName
 	c_snapshotPath := C.CString(snapshotPath)
 	defer free(c_snapshotPath)
 
 	C.fnvlist_add_boolean(nvl, c_snapshotPath)
 
+	log.Debugf("Will snapshot %s", snapshotPath)
 	if C.zfs_snapshot_nvl(zfs, nvl, props) != 0 {
-		return "", "", fmt.Errorf("Error snapshoting %s", id)
+		return fmt.Errorf("Error snapshoting %s", snapshotPath)
 	}
 
+	return nil
+}
+
+func volumeSnapshotGenerate(zfs *C.libzfs_handle_t, id string) (string, string, error) {
+	snapshotName := fmt.Sprintf("%d", time.Now().Nanosecond())
+	snapshotPath := id + "@" + snapshotName
+	err := volumeSnapshot(zfs, snapshotPath)
+	if err != nil {
+		return "", "", err
+	}
 	return snapshotPath, snapshotName, nil
 }
 
 func volumeClone(zfs *C.libzfs_handle_t, snapshot, id, mountpoint string) (*C.zfs_handle_t, error) {
+	log.Debugf("volumeClone(%s, %s, %s)", snapshot, id, mountpoint)
 	c_snapshot := C.CString(snapshot)
 	defer free(c_snapshot)
 	c_id := C.CString(id)
@@ -255,6 +270,10 @@ func volumeClone(zfs *C.libzfs_handle_t, snapshot, id, mountpoint string) (*C.zf
 		return nil, fmt.Errorf("Couldn't open snapshot %s", snapshot)
 	}
 	defer C.zfs_close(zhp)
+
+	if C.zfs_create_ancestors(zfs, c_id) != 0 {
+		return nil, fmt.Errorf("Couldn't create zfs ancestors for %s", id)
+	}
 
 	if C.zfs_clone(zhp, c_id, props) != 0 {
 		return nil, fmt.Errorf("Couldn't clone snapshot")
@@ -309,42 +328,83 @@ func volumeSnapshotDelete(zfs *C.libzfs_handle_t, parent string, snapshotName st
 	return nil
 }
 
-func volumeCloneFrom(zfs *C.libzfs_handle_t, id, parent, mountPoint string) error {
+func (d *Driver) volumeCloneFrom(id, parent string) error {
 	var err error
+	var snapshotPath string
+	var snapshotName string
+	var parentPath string
+
+	if parent[len(parent)-5:] == "-init" {
+		parentPath = d.ZfsPath(parent[:len(parent)-5], false)
+	} else {
+		parentPath = d.ZfsPath(parent, true)
+	}
+
 	// Snapshot parent
-	snapshotPath, snapshotName, err := volumeSnapshot(zfs, parent)
+	snapshotPath, snapshotName, err = volumeSnapshotGenerate(d.g_zfs, parentPath)
 	if err != nil {
 		return err
 	}
+	defer volumeSnapshotDelete(d.g_zfs, parentPath, snapshotName)
 
-	// Clone from parent
-	clone, err := volumeClone(zfs, snapshotPath, id, mountPoint)
-	if err != nil {
-		return err
-	}
-	defer C.zfs_close(clone)
+	if id == parent[:len(parent)-5] {
+		// zfs clone docker/<id>/init@snap docker/<id>/volume
+		clone, err := volumeClone(d.g_zfs, snapshotPath, d.ZfsPath(id, true), d.ZfsMountpoint(id, true))
+		if err != nil {
+			return err
+		}
+		defer C.zfs_close(clone)
 
-	// Remove snapshot
-	err = volumeSnapshotDelete(zfs, parent, snapshotName)
-	if err != nil {
-		return err
+		// zfs snapshot docker/<id>/volume@init
+		err = volumeSnapshot(d.g_zfs, d.ZfsPath(id, true)+"@init")
+		if err != nil {
+			return err
+		}
+	} else {
+		if id[len(id)-5:] == "-init" {
+			// zfs clone docker/<parent>/volume@snap docker/<id>/init
+			clone, err := volumeClone(d.g_zfs, snapshotPath, d.ZfsPath(id[:len(id)-5], false), d.ZfsMountpoint(id, false))
+			if err != nil {
+				return err
+			}
+			defer C.zfs_close(clone)
+		} else {
+			// zfs clone docker/<parent>/volume@snap docker/<id>/volume
+			clone, err := volumeClone(d.g_zfs, snapshotPath, d.ZfsPath(id, true), d.ZfsMountpoint(id, true))
+			if err != nil {
+				return err
+			}
+			defer C.zfs_close(clone)
+		}
 	}
 
 	return nil
 }
 
-func (d *Driver) ZfsPath(id string) string {
-	log.Debugf("d->ZfsPath(%s)", id)
-	return d.options.zpoolName + "/" + id
+func (d *Driver) ZfsPath(id string, volume bool) string {
+	log.Debugf("d->ZfsPath(%s, %b)", id, volume)
+	if volume {
+		return d.options.zpoolname + "/" + id + "/volume"
+	} else {
+		return d.options.zpoolname + "/" + id + "/init"
+	}
+}
+
+func (d *Driver) ZfsMountpoint(id string, volume bool) string {
+	log.Debugf("d->ZfsMountpoint(%s, %b)", id, volume)
+	if volume {
+		return path.Join(d.options.basepath, "graph", id)
+	} else {
+		return path.Join(d.options.basepath, "init", id[:len(id)-5])
+	}
 }
 
 func (d *Driver) Create(id string, parent string) error {
 	log.Debugf("d->Create(%s, %s)", id, parent)
-	mountPoint := path.Join(d.options.mountPath, "graph", id)
 	if parent == "" {
-		return volumeCreate(d.g_zfs, d.ZfsPath(id), mountPoint)
+		return volumeCreate(d.g_zfs, d.ZfsPath(id, true), d.ZfsMountpoint(id, true))
 	} else {
-		return volumeCloneFrom(d.g_zfs, d.ZfsPath(id), d.ZfsPath(parent), mountPoint)
+		return d.volumeCloneFrom(id, parent)
 	}
 }
 
@@ -416,7 +476,12 @@ func (d *Driver) Remove(id string) error {
 	// remove head, children will be removed once dereferenced
 
 	var cb destroy_cbdata
-	c_fullpath := C.CString(d.ZfsPath(id))
+	var c_fullpath *C.char
+	if id[len(id)-5:] == "-init" {
+		c_fullpath = C.CString(d.ZfsPath(id, true))
+	} else {
+		c_fullpath = C.CString(d.ZfsPath(id, false))
+	}
 	defer free(c_fullpath)
 	cb.cb_error = false
 	cb.cb_zfs = d.g_zfs
@@ -484,39 +549,108 @@ func zfs_read_mountpoint(zhp *C.zfs_handle_t) (string, error) {
 
 func (d *Driver) Get(id, mountLabel string) (string, error) {
 	log.Debugf("d->Get(%s, %s)", id, mountLabel)
-	c_fullpath := C.CString(d.ZfsPath(id))
-	defer free(c_fullpath)
+	var err error
+	var mountpoint string
 
-	var zhp = C.zfs_open(d.g_zfs, c_fullpath, C.ZFS_TYPE_DATASET)
-	if zhp == nil {
-		return "", fmt.Errorf("Couldn't locate %s", id)
+	if id[len(id)-5:] == "-init" {
+		c_fullpath := C.CString(d.ZfsPath(id[:len(id)-5], false))
+		defer free(c_fullpath)
+
+		var zhp = C.zfs_open(d.g_zfs, c_fullpath, C.ZFS_TYPE_DATASET)
+		if zhp == nil {
+			return "", fmt.Errorf("Couldn't locate %s", id)
+		}
+		defer C.zfs_close(zhp)
+
+		mountpoint, err = zfs_read_mountpoint(zhp)
+		if err != nil {
+			return "", err
+		}
+	} else {
+		c_fullpath := C.CString(d.ZfsPath(id, true))
+		defer free(c_fullpath)
+
+		var zhp = C.zfs_open(d.g_zfs, c_fullpath, C.ZFS_TYPE_DATASET)
+		if zhp == nil {
+			return "", fmt.Errorf("Couldn't locate %s", id)
+		}
+		defer C.zfs_close(zhp)
+
+		mountpoint, err = zfs_read_mountpoint(zhp)
+		if err != nil {
+			return "", err
+		}
 	}
-	defer C.zfs_close(zhp)
 
-	mountPoint, err := zfs_read_mountpoint(zhp)
-	if err != nil {
-		return "", err
-	}
-
-	// Need to get back zfs get -o mountpoint
-	return mountPoint, nil
+	return mountpoint, nil
 }
 
 func (d *Driver) Put(id string) {
-	log.Debugf("d->Id(%s)", id)
+	log.Debugf("d->Put(%s)", id)
 	// FS is already mounted
 }
 
-func (d *Driver) Exists(id string) bool {
-	log.Debugf("d->Exists(%s)", id)
-	c_fullpath := C.CString(d.ZfsPath(id))
+func exists(zfs *C.libzfs_handle_t, fullpath string) bool {
+	c_fullpath := C.CString(fullpath)
 	defer free(c_fullpath)
 
-	var zhp = C.zfs_open(d.g_zfs, c_fullpath, C.ZFS_TYPE_DATASET)
+	var zhp = C.zfs_open(zfs, c_fullpath, C.ZFS_TYPE_DATASET)
 	if zhp == nil {
 		return false
 	}
 	defer C.zfs_close(zhp)
 
 	return true
+}
+
+func (d *Driver) Exists(id string) bool {
+	log.Debugf("d->Exists(%s)", id)
+	if len(id) > 5 {
+		if id[len(id)-5:] == "-init" {
+			return exists(d.g_zfs, d.ZfsPath(id, false))
+		} else {
+			return exists(d.g_zfs, d.ZfsPath(id, true))
+		}
+	} else {
+		return false
+	}
+}
+
+func (d *Driver) Diff(id string) (archive.Archive, error) {
+	log.Debugf("d->Diff(%s)", id)
+	// TODO
+	return nil, nil
+}
+
+func (d *Driver) ApplyDiff(id string, parent string, diff archive.ArchiveReader) (bytes int64, err error) {
+	log.Debugf("d->ApplyDiff(%s)", id)
+	// TODO
+	//return archive.Untar(diff, path.Join(a.rootPath(), "diff", id), nil)
+	return 0, nil
+}
+
+func (d *Driver) DiffSize(id string) (int64, error) {
+	log.Debugf("d->DiffSize(%s)", id)
+	// zfs get logicalused docker/<id>/volume
+
+	c_fullpath := C.CString(d.ZfsPath(id, true))
+	defer free(c_fullpath)
+
+	var zhp = C.zfs_open(d.g_zfs, c_fullpath, C.ZFS_TYPE_DATASET)
+	if zhp == nil {
+		return 0, fmt.Errorf("Couldn't locate %s", id)
+	}
+	defer C.zfs_close(zhp)
+
+	size := int64(C.zfs_prop_get_int(zhp, C.ZFS_PROP_LOGICALUSED))
+
+	log.Debugf("Size returned %d", size)
+
+	return size, nil
+}
+
+func (d *Driver) Changes(id string) ([]archive.Change, error) {
+	log.Debugf("d->Changes(%s)", id)
+	// TODO
+	return nil, nil
 }

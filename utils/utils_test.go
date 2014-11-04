@@ -5,35 +5,6 @@ import (
 	"testing"
 )
 
-func TestCheckLocalDns(t *testing.T) {
-	for resolv, result := range map[string]bool{`# Dynamic
-nameserver 10.0.2.3
-search docker.com`: false,
-		`# Dynamic
-#nameserver 127.0.0.1
-nameserver 10.0.2.3
-search docker.com`: false,
-		`# Dynamic
-nameserver 10.0.2.3 #not used 127.0.1.1
-search docker.com`: false,
-		`# Dynamic
-#nameserver 10.0.2.3
-#search docker.com`: true,
-		`# Dynamic
-nameserver 127.0.0.1
-search docker.com`: true,
-		`# Dynamic
-nameserver 127.0.1.1
-search docker.com`: true,
-		`# Dynamic
-`: true,
-		``: true,
-	} {
-		if CheckLocalDns([]byte(resolv)) != result {
-			t.Fatalf("Wrong local dns detection: {%s} should be %v", resolv, result)
-		}
-	}
-}
 func TestReplaceAndAppendEnvVars(t *testing.T) {
 	var (
 		d = []string{"HOME=/"}
@@ -124,5 +95,26 @@ func TestReadSymlinkedDirectoryToFile(t *testing.T) {
 
 	if err = os.Remove("/tmp/fileLinkTest"); err != nil {
 		t.Errorf("failed to remove symlink: %s", err)
+	}
+}
+
+func TestValidGitTransport(t *testing.T) {
+	for _, url := range []string{
+		"git://github.com/docker/docker",
+		"git@github.com:docker/docker.git",
+		"https://github.com/docker/docker.git",
+		"http://github.com/docker/docker.git",
+	} {
+		if ValidGitTransport(url) == false {
+			t.Fatalf("%q should be detected as valid Git prefix", url)
+		}
+	}
+
+	for _, url := range []string{
+		"github.com/docker/docker",
+	} {
+		if ValidGitTransport(url) == true {
+			t.Fatalf("%q should not be detected as valid Git prefix", url)
+		}
 	}
 }

@@ -9,10 +9,8 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/docker/docker/archive"
-	"github.com/docker/docker/daemon/graphdriver"
-	"github.com/docker/docker/pkg/ioutils"
-	"github.com/docker/docker/pkg/log"
+	log "github.com/Sirupsen/logrus"
+	"github.com/docker/docker/pkg/archive"
 	"github.com/docker/docker/runconfig"
 	"github.com/docker/docker/utils"
 )
@@ -40,14 +38,18 @@ type Image struct {
 }
 
 func LoadImage(root string) (*Image, error) {
-	// Load the json data
-	jsonData, err := ioutil.ReadFile(jsonPath(root))
+	// Open the JSON file to decode by streaming
+	jsonSource, err := os.Open(jsonPath(root))
 	if err != nil {
 		return nil, err
 	}
-	img := &Image{}
+	defer jsonSource.Close()
 
-	if err := json.Unmarshal(jsonData, img); err != nil {
+	img := &Image{}
+	dec := json.NewDecoder(jsonSource)
+
+	// Decode the JSON data
+	if err := dec.Decode(img); err != nil {
 		return nil, err
 	}
 	if err := utils.ValidateID(img.ID); err != nil {
@@ -72,51 +74,18 @@ func LoadImage(root string) (*Image, error) {
 	return img, nil
 }
 
-func StoreImage(img *Image, jsonData []byte, layerData archive.ArchiveReader, root, layer string) error {
+func StoreImage(img *Image, layerData archive.ArchiveReader, root string) error {
 	// Store the layer
 	var (
 		size   int64
 		err    error
 		driver = img.graph.Driver()
 	)
-	if err := os.MkdirAll(layer, 0755); err != nil {
-		return err
-	}
 
 	// If layerData is not nil, unpack it into the new layer
 	if layerData != nil {
-		if differ, ok := driver.(graphdriver.Differ); ok {
-			if err := differ.ApplyDiff(img.ID, layerData); err != nil {
-				return err
-			}
-
-			if size, err = differ.DiffSize(img.ID); err != nil {
-				return err
-			}
-		} else {
-			start := time.Now().UTC()
-			log.Debugf("Start untar layer")
-			if err := archive.ApplyLayer(layer, layerData); err != nil {
-				return err
-			}
-			log.Debugf("Untar time: %vs", time.Now().UTC().Sub(start).Seconds())
-
-			if img.Parent == "" {
-				if size, err = utils.TreeSize(layer); err != nil {
-					return err
-				}
-			} else {
-				parent, err := driver.Get(img.Parent, "")
-				if err != nil {
-					return err
-				}
-				defer driver.Put(img.Parent)
-				changes, err := archive.ChangesDirs(layer, parent)
-				if err != nil {
-					return err
-				}
-				size = archive.ChangesSize(layer, changes)
-			}
+		if size, err = driver.ApplyDiff(img.ID, img.Parent, layerData); err != nil {
+			return err
 		}
 	}
 
@@ -125,20 +94,14 @@ func StoreImage(img *Image, jsonData []byte, layerData archive.ArchiveReader, ro
 		return err
 	}
 
-	// If raw json is provided, then use it
-	if jsonData != nil {
-		if err := ioutil.WriteFile(jsonPath(root), jsonData, 0600); err != nil {
-			return err
-		}
-	} else {
-		if jsonData, err = json.Marshal(img); err != nil {
-			return err
-		}
-		if err := ioutil.WriteFile(jsonPath(root), jsonData, 0600); err != nil {
-			return err
-		}
+	f, err := os.OpenFile(jsonPath(root), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, os.FileMode(0600))
+	if err != nil {
+		return err
 	}
-	return nil
+
+	defer f.Close()
+
+	return json.NewEncoder(f).Encode(img)
 }
 
 func (img *Image) SetGraph(graph Graph) {
@@ -178,52 +141,10 @@ func (img *Image) TarLayer() (arch archive.Archive, err error) {
 	if img.graph == nil {
 		return nil, fmt.Errorf("Can't load storage driver for unregistered image %s", img.ID)
 	}
+
 	driver := img.graph.Driver()
-	if differ, ok := driver.(graphdriver.Differ); ok {
-		return differ.Diff(img.ID)
-	}
 
-	imgFs, err := driver.Get(img.ID, "")
-	if err != nil {
-		return nil, err
-	}
-
-	defer func() {
-		if err != nil {
-			driver.Put(img.ID)
-		}
-	}()
-
-	if img.Parent == "" {
-		archive, err := archive.Tar(imgFs, archive.Uncompressed)
-		if err != nil {
-			return nil, err
-		}
-		return ioutils.NewReadCloserWrapper(archive, func() error {
-			err := archive.Close()
-			driver.Put(img.ID)
-			return err
-		}), nil
-	}
-
-	parentFs, err := driver.Get(img.Parent, "")
-	if err != nil {
-		return nil, err
-	}
-	defer driver.Put(img.Parent)
-	changes, err := archive.ChangesDirs(imgFs, parentFs)
-	if err != nil {
-		return nil, err
-	}
-	archive, err := archive.ExportChanges(imgFs, changes)
-	if err != nil {
-		return nil, err
-	}
-	return ioutils.NewReadCloserWrapper(archive, func() error {
-		err := archive.Close()
-		driver.Put(img.ID)
-		return err
-	}), nil
+	return driver.Diff(img.ID, img.Parent)
 }
 
 // Image includes convenience proxy functions to its graph

@@ -7,6 +7,7 @@ docker-run - Run a command in a new container
 # SYNOPSIS
 **docker run**
 [**-a**|**--attach**[=*[]*]]
+[**--add-host**[=*[]*]]
 [**-c**|**--cpu-shares**[=*0*]]
 [**--cap-add**[=*[]*]]
 [**--cap-drop**[=*[]*]]
@@ -22,11 +23,13 @@ docker-run - Run a command in a new container
 [**--expose**[=*[]*]]
 [**-h**|**--hostname**[=*HOSTNAME*]]
 [**-i**|**--interactive**[=*false*]]
+[**--security-opt**[=*[]*]]
 [**--link**[=*[]*]]
 [**--lxc-conf**[=*[]*]]
 [**-m**|**--memory**[=*MEMORY*]]
 [**--name**[=*NAME*]]
 [**--net**[=*"bridge"*]]
+[**--mac-address**[=*MACADDRESS*]]
 [**-P**|**--publish-all**[=*false*]]
 [**-p**|**--publish**[=*[]*]]
 [**--privileged**[=*false*]]
@@ -64,6 +67,10 @@ error. It can even pretend to be a TTY (this is what most commandline
 executables expect) and pass along signals. The **-a** option can be set for
 each of stdin, stdout, and stderr.
 
+**--add-host**=*hostname*:*ip*
+   Add a line to /etc/hosts. The format is hostname:ip.  The **--add-host**
+option can be set multiple times.
+
 **-c**, **--cpu-shares**=0
    CPU shares in relative weight. You can increase the priority of a container
 with the -c option. By default, all containers run at the same priority and get
@@ -92,11 +99,12 @@ the detached mode, then you cannot use the **-rm** option.
 
    When attached in the tty mode, you can detach from a running container without
 stopping the process by pressing the keys CTRL-P CTRL-Q.
+
 **--device**=[]
-   Add a host device to the container (e.g. --device=/dev/sdc:/dev/xvdc)
+   Add a host device to the container (e.g. --device=/dev/sdc:/dev/xvdc:rwm)
 
 **--dns-search**=[]
-   Set custom DNS search domains
+   Set custom DNS search domains (Use --dns-search=. if you don't wish to set the search domain)
 
 **--dns**=*IP-address*
    Set custom DNS servers. This option can be used to override the DNS
@@ -125,18 +133,21 @@ ENTRYPOINT.
 **--env-file**=[]
    Read in a line delimited file of environment variables
 
-**--expose**=*port*
-   Expose a port from the container without publishing it to your host. A
-containers port can be exposed to other containers in three ways: 1) The
-developer can expose the port using the EXPOSE parameter of the Dockerfile, 2)
-the operator can use the **--expose** option with **docker run**, or 3) the
-container can be started with the **--link**.
+**--expose**=[]
+   Expose a port or a range of ports (e.g. --expose=3300-3310) from the container without publishing it to your host
 
 **-h**, **--hostname**=*hostname*
    Sets the container host name that is available inside the container.
 
 **-i**, **--interactive**=*true*|*false*
    When set to true, keep stdin open even if not attached. The default is false.
+
+**--security-opt**=*secdriver*:*name*:*value*
+    "label:user:USER"   : Set the label user for the container
+    "label:role:ROLE"   : Set the label role for the container
+    "label:type:TYPE"   : Set the label type for the container
+    "label:level:LEVEL" : Set the label level for the container
+    "label:disable"     : Turn off label confinement for the container
 
 **--link**=*name*:*alias*
    Add link to another container. The format is name:alias. If the operator
@@ -177,12 +188,21 @@ and foreground Docker containers.
                                'container:<name|id>': reuses another container network stack
                                'host': use the host network stack inside the container.  Note: the host mode gives the container full access to local system services such as D-bus and is therefore considered insecure.
 
+**--mac-address**=*macaddress*
+   Set the MAC address for the container's Ethernet device:
+    --mac-address=12:34:56:78:9a:bc
+
+Remember that the MAC address in an Ethernet network must be unique.
+The IPv6 link-local address will be based on the device's MAC address
+according to RFC4862.
+
 **-P**, **--publish-all**=*true*|*false*
    When set to true publish all exposed ports to the host interfaces. The
 default is false. If the operator uses -P (or -p) then Docker will make the
 exposed port accessible on the host and the ports will be available to any
-client that can reach the host. To find the map between the host ports and the
-exposed ports, use **docker port**.
+client that can reach the host. When using -P, Docker will bind the exposed
+ports to a random port on the host between 49153 and 65535. To find the
+mapping between the host ports and the exposed ports, use **docker port**.
 
 **-p**, **--publish**=[]
    Publish a container's port to the host (format: ip:hostPort:containerPort |
@@ -217,11 +237,11 @@ interactive shell. The default is value is false.
 
 
 **-v**, **--volume**=*volume*[:ro|:rw]
-   Bind mount a volume to the container. 
+   Bind mount a volume to the container.
 
 The **-v** option can be used one or
 more times to add one or more mounts to a container. These mounts can then be
-used in other containers using the **--volumes-from** option. 
+used in other containers using the **--volumes-from** option.
 
 The volume may be optionally suffixed with :ro or :rw to mount the volumes in
 read-only or read-write mode, respectively. By default, the volumes are mounted
@@ -232,11 +252,11 @@ read-write. See examples.
 Once a volume is mounted in a one container it can be shared with other
 containers using the **--volumes-from** option when running those other
 containers. The volumes can be shared even if the original container with the
-mount is not running. 
+mount is not running.
 
-The container ID may be optionally suffixed with :ro or 
-:rw to mount the volumes in read-only or read-write mode, respectively. By 
-default, the volumes are mounted in the same mode (read write or read only) as 
+The container ID may be optionally suffixed with :ro or
+:rw to mount the volumes in read-only or read-write mode, respectively. By
+default, the volumes are mounted in the same mode (read write or read only) as
 the reference container.
 
 
@@ -329,7 +349,7 @@ to create a secure tunnel for the parent to access.
 ## Mapping Ports for External Usage
 
 The exposed port of an application can be mapped to a host port using the **-p**
-flag. For example a httpd port 80 can be mapped to the host port 8080 using the
+flag. For example, a httpd port 80 can be mapped to the host port 8080 using the
 following:
 
     # docker run -p 8080:80 -d -i -t fedora/httpd
@@ -376,6 +396,35 @@ to the host directory:
 
 Now, writing to the /data1 volume in the container will be allowed and the
 changes will also be reflected on the host in /var/db.
+
+## Using alternative security labeling
+
+You can override the default labeling scheme for each container by specifying
+the `--security-opt` flag. For example, you can specify the MCS/MLS level, a
+requirement for MLS systems. Specifying the level in the following command
+allows you to share the same content between containers.
+
+    # docker run --security-opt label:level:s0:c100,c200 -i -t fedora bash
+
+An MLS example might be:
+
+    # docker run --security-opt label:level:TopSecret -i -t rhel7 bash
+
+To disable the security labeling for this container versus running with the
+`--permissive` flag, use the following command:
+
+    # docker run --security-opt label:disable -i -t fedora bash
+
+If you want a tighter security policy on the processes within a container,
+you can specify an alternate type for the container. You could run a container
+that is only allowed to listen on Apache ports by executing the following
+command:
+
+    # docker run --security-opt label:type:svirt_apache_t -i -t centos bash
+
+Note:
+
+You would have to write policy defining a `svirt_apache_t` type.
 
 # HISTORY
 April 2014, Originally compiled by William Henry (whenry at redhat dot com)

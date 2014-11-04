@@ -14,7 +14,7 @@ Docker made the choice `172.17.42.1/16` when I started it a few minutes
 ago, for example — a 16-bit netmask providing 65,534 addresses for the
 host machine and its containers.
 
-> **Note:** 
+> **Note:**
 > This document discusses advanced networking configuration
 > and options for Docker. In most cases you won't need this information.
 > If you're looking to get started with a simpler explanation of Docker
@@ -52,6 +52,9 @@ server when it starts up, and cannot be changed once it is running:
     [Building your own bridge](#bridge-building)
 
  *  `--bip=CIDR` — see
+    [Customizing docker0](#docker0)
+
+ *  `--fixed-cidr` — see
     [Customizing docker0](#docker0)
 
  *  `-H SOCKET...` or `--host=SOCKET...` —
@@ -99,6 +102,9 @@ Finally, several networking options can only be provided when calling
     [Communication between containers](#between-containers)
 
  *  `--net=bridge|none|container:NAME_or_ID|host` — see
+    [How Docker networks a container](#container-networking)
+
+ *  `--mac-address=MACADDRESS...` — see
     [How Docker networks a container](#container-networking)
 
  *  `-p SPEC` or `--publish=SPEC` — see
@@ -167,6 +173,7 @@ Four different options affect container domain name services.
     When a container process attempts to access `host` and the search
     domain `example.com` is set, for instance, the DNS logic will not
     only look up `host` but also `host.example.com`.
+    Use `--dns-search=.` if you don't wish to set the search domain.
 
 Note that Docker, in the absence of either of the last two options
 above, will make `/etc/resolv.conf` inside of each container look like
@@ -310,13 +317,13 @@ page.  There are two approaches.
 First, you can supply `-P` or `--publish-all=true|false` to `docker run`
 which is a blanket operation that identifies every port with an `EXPOSE`
 line in the image's `Dockerfile` and maps it to a host port somewhere in
-the range 49000–49900.  This tends to be a bit inconvenient, since you
+the range 49153–65535.  This tends to be a bit inconvenient, since you
 then have to run other `docker` sub-commands to learn which external
 port a given service was mapped to.
 
 More convenient is the `-p SPEC` or `--publish=SPEC` option which lets
 you be explicit about exactly which external port on the Docker server —
-which can be any port at all, not just those in the 49000–49900 block —
+which can be any port at all, not just those in the 49153-65535 block —
 you want mapped to which port in the container.
 
 Either way, you should be able to peek at what Docker has accomplished
@@ -365,16 +372,24 @@ By default, the Docker server creates and configures the host system's
 can pass packets back and forth between other physical or virtual
 network interfaces so that they behave as a single Ethernet network.
 
-Docker configures `docker0` with an IP address and netmask so the host
-machine can both receive and send packets to containers connected to the
-bridge, and gives it an MTU — the *maximum transmission unit* or largest
-packet length that the interface will allow — of either 1,500 bytes or
-else a more specific value copied from the Docker host's interface that
-supports its default route.  Both are configurable at server startup:
+Docker configures `docker0` with an IP address, netmask and IP
+allocation range. The host machine can both receive and send packets to
+containers connected to the bridge, and gives it an MTU — the *maximum
+transmission unit* or largest packet length that the interface will
+allow — of either 1,500 bytes or else a more specific value copied from
+the Docker host's interface that supports its default route.  These
+options are configurable at server startup:
 
  *  `--bip=CIDR` — supply a specific IP address and netmask for the
     `docker0` bridge, using standard CIDR notation like
     `192.168.1.5/24`.
+
+ *  `--fixed-cidr=CIDR` — restrict the IP range from the `docker0` subnet,
+    using the standard CIDR notation like `172.167.1.0/28`. This range must
+    be and IPv4 range for fixed IPs (ex: 10.20.0.0/16) and must be a subset
+    of the bridge IP range (`docker0` or set using `--bridge`). For example
+    with `--fixed-cidr=192.168.1.0/25`, IPs for your containers will be chosen
+    from the first half of `192.168.1.0/24` subnet.
 
  *  `--mtu=BYTES` — override the maximum packet length on `docker0`.
 
@@ -438,7 +453,7 @@ If you want to take Docker out of the business of creating its own
 Ethernet bridge entirely, you can set up your own bridge before starting
 Docker and use `-b BRIDGE` or `--bridge=BRIDGE` to tell Docker to use
 your bridge instead.  If you already have Docker up and running with its
-old `bridge0` still configured, you will probably want to begin by
+old `docker0` still configured, you will probably want to begin by
 stopping the service and removing the interface:
 
     # Stopping Docker and removing docker0
@@ -525,9 +540,15 @@ The steps with which Docker configures a container are:
     separate and unique network interface namespace, there are no
     physical interfaces with which this name could collide.
 
-4.  Give the container's `eth0` a new IP address from within the
+4.  Set the interface's MAC address according to the `--mac-address`
+    parameter or generate a random one.
+
+5.  Give the container's `eth0` a new IP address from within the
     bridge's range of network addresses, and set its default route to
-    the IP address that the Docker host owns on the bridge.
+    the IP address that the Docker host owns on the bridge. If available
+    the IP address is generated from the MAC address. This prevents ARP
+    cache invalidation problems, when a new container comes up with an
+    IP used in the past by another container with another MAC.
 
 With these steps complete, the container now possesses an `eth0`
 (virtual) network card and will find itself able to communicate with
@@ -609,6 +630,7 @@ Docker do all of the configuration:
 
     $ sudo ip link set B netns $pid
     $ sudo ip netns exec $pid ip link set dev B name eth0
+    $ sudo ip netns exec $pid ip link set eth0 address 12:34:56:78:9a:bc
     $ sudo ip netns exec $pid ip link set eth0 up
     $ sudo ip netns exec $pid ip addr add 172.17.42.99/16 dev eth0
     $ sudo ip netns exec $pid ip route add default via 172.17.42.1

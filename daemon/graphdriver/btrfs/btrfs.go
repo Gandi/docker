@@ -40,13 +40,15 @@ func Init(home string, options []string) (graphdriver.Driver, error) {
 		return nil, err
 	}
 
-	if err := graphdriver.MakePrivate(home); err != nil {
+	if err := mount.MakePrivate(home); err != nil {
 		return nil, err
 	}
 
-	return &Driver{
+	driver := &Driver{
 		home: home,
-	}, nil
+	}
+
+	return graphdriver.NaiveDiffDriver(driver), nil
 }
 
 type Driver struct {
