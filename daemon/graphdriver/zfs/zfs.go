@@ -21,7 +21,9 @@ import (
 	"unsafe"
 
 	zfs "github.com/Mic92/go-zfs"
+	"github.com/docker/docker/archive"
 	"github.com/docker/docker/daemon/graphdriver"
+	"github.com/docker/docker/pkg/ioutils"
 	"github.com/docker/docker/pkg/log"
 	"github.com/docker/docker/pkg/parsers"
 )
@@ -178,7 +180,7 @@ func cloneFilesystem(id, parent, mountpoint string) error {
 		return err
 	}
 	snapshotName := fmt.Sprintf("%d", time.Now().Nanosecond())
-	snapshot, err := parentDataset.Snapshot(snapshotName, /*recursive */ false)
+	snapshot, err := parentDataset.Snapshot(snapshotName /*recursive */, false)
 	if snapshot == nil {
 		return err
 	}
@@ -187,10 +189,10 @@ func cloneFilesystem(id, parent, mountpoint string) error {
 		"mountpoint": mountpoint,
 	})
 	if err != nil {
-		snapshot.Destroy(/*recursive*/ false, /*deferred*/ true)
+		snapshot.Destroy( /*recursive*/ false /*deferred*/, true)
 		return err
 	}
-	err = snapshot.Destroy(/*recursive*/ false, /*deferred*/ true)
+	err = snapshot.Destroy( /*recursive*/ false /*deferred*/, true)
 	return err
 }
 
@@ -221,7 +223,7 @@ func (d *Driver) Remove(id string) error {
 		return err
 	}
 
-	return dataset.Destroy(/* recursive */ false, /* deferred */ false)
+	return dataset.Destroy(/* recursive */ true, /* deferred */ false)
 }
 
 func (d *Driver) Get(id, mountLabel string) (string, error) {
@@ -243,4 +245,96 @@ func (d *Driver) Exists(id string) bool {
 	log.Debugf("d->Exists(%s)", id)
 	_, err := zfs.GetDataset(d.ZfsPath(id))
 	return err != nil
+}
+
+func zfsChanges(dataset *zfs.Dataset) ([]archive.Change, error) {
+	if dataset.Origin == "" { // should never happen
+		return nil, fmt.Errorf("no origin found for dataset '%s'. expected a clone", dataset.Name)
+	}
+	changes, err := dataset.Diff(dataset.Origin)
+	if err != nil {
+		return nil, err
+	}
+
+	// for rename changes, we have to add a ADD and a REMOVE
+	renameCount := 0
+	for _, change := range changes {
+		if change.Change == zfs.RENAMED {
+			renameCount++
+		}
+	}
+	archiveChanges := make([]archive.Change, len(changes)+renameCount)
+	i := 0
+	for _, change := range changes {
+		var changeType archive.ChangeType
+		mountpointLen := len(dataset.Mountpoint)
+		basePath := change.Path[mountpointLen:]
+		switch change.Change {
+		case zfs.RENAMED:
+			archiveChanges[i] = archive.Change{basePath, archive.ChangeDelete}
+			newBasePath := change.NewPath[mountpointLen:]
+			archiveChanges[i+1] = archive.Change{newBasePath, archive.ChangeAdd}
+			i += 2
+			continue
+		case zfs.CREATED:
+			changeType = archive.ChangeAdd
+		case zfs.MODIFIED:
+			changeType = archive.ChangeModify
+		case zfs.REMOVED:
+			changeType = archive.ChangeDelete
+		}
+		archiveChanges[i] = archive.Change{basePath, changeType}
+		i++
+	}
+
+	return archiveChanges, nil
+}
+
+func (d *Driver) Diff(id string) (archive.Archive, error) {
+	log.Debugf("d->Diff(%s)", id)
+	dataset, err := zfs.GetDataset(d.ZfsPath(id))
+	if err != nil {
+		return nil, err
+	}
+	changes, err := zfsChanges(dataset)
+	if err != nil {
+		return nil, err
+	}
+
+	archive, err := archive.ExportChanges(dataset.Mountpoint, changes)
+	if err != nil {
+		return nil, err
+	}
+	return ioutils.NewReadCloserWrapper(archive, func() error {
+		err := archive.Close()
+		d.Put(id)
+		return err
+	}), nil
+}
+
+func (d *Driver) DiffSize(id string) (bytes int64, err error) {
+	log.Debugf("d->DiffSize(%s)", id)
+	dataset, err := zfs.GetDataset(d.ZfsPath(id))
+	if err == nil {
+		return int64((*dataset).Logicalused), nil
+	} else {
+		return -1, err
+	}
+}
+
+func (d *Driver) Changes(id string) ([]archive.Change, error) {
+	log.Debugf("d->Changes(%s)", id)
+	dataset, err := zfs.GetDataset(d.ZfsPath(id))
+	if err != nil {
+		return nil, err
+	}
+	return zfsChanges(dataset)
+}
+
+func (d *Driver) ApplyDiff(id string, diff archive.ArchiveReader) error {
+	dataset, err := zfs.GetDataset(d.ZfsPath(id))
+	if err != nil {
+		return err
+	}
+	return archive.ApplyLayer(dataset.Mountpoint, diff)
 }
