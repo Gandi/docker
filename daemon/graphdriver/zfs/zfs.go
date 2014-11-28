@@ -37,6 +37,12 @@ func init() {
 	graphdriver.Register("zfs", Init)
 }
 
+type Logger struct{}
+
+func (*Logger) Log(cmd []string) {
+	log.Debugf("[zfs] %s", strings.Join(cmd, " "))
+}
+
 func Init(base string, opt []string) (graphdriver.Driver, error) {
 	var err error
 	options, err := parseOptions(opt)
@@ -70,6 +76,9 @@ func Init(base string, opt []string) (graphdriver.Driver, error) {
 			return nil, err
 		}
 	}
+
+	logger := Logger{}
+	zfs.SetLogger(&logger)
 
 	dataset, err := zfs.GetDataset(options.fsName)
 	if err != nil {
@@ -132,7 +141,7 @@ func lookupZfsPool(rootdir string) (string, error) {
 	wantedDev := stat.Dev
 
 	if Cfp = C.setmntent(CprocMounts, CopenMod); Cfp == nil {
-		return "", fmt.Errorf("failed to open /proc/mounts")
+		return "", fmt.Errorf("Failed to open /proc/mounts")
 	}
 	defer C.endmntent(Cfp)
 
@@ -147,7 +156,7 @@ func lookupZfsPool(rootdir string) (string, error) {
 		}
 	}
 	// should never happen
-	return "", fmt.Errorf("failed to find zfs pool in /proc/mounts")
+	return "", fmt.Errorf("Failed to find zfs pool in /proc/mounts")
 }
 
 func free(p *C.char) {
@@ -160,17 +169,14 @@ type Driver struct {
 }
 
 func (d *Driver) String() string {
-	log.Debugf("d->String()")
 	return "zfs"
 }
 
 func (d *Driver) Cleanup() error {
-	log.Debugf("d->Cleanup()")
 	return nil
 }
 
 func (d *Driver) Status() [][2]string {
-	log.Debugf("d->Status()")
 	return nil
 }
 
@@ -197,12 +203,10 @@ func cloneFilesystem(id, parent, mountpoint string) error {
 }
 
 func (d *Driver) ZfsPath(id string) string {
-	log.Debugf("d->ZfsPath(%s)", id)
 	return d.options.fsName + "/" + id
 }
 
 func (d *Driver) Create(id string, parent string) error {
-	log.Debugf("d->Create(%s, %s)", id, parent)
 	mountPoint := path.Join(d.options.mountPath, "graph", id)
 	if parent == "" {
 		_, err := zfs.CreateFilesystem(d.ZfsPath(id), map[string]string{
@@ -216,18 +220,15 @@ func (d *Driver) Create(id string, parent string) error {
 }
 
 func (d *Driver) Remove(id string) error {
-	log.Debugf("d->Remove(%s)", id)
-
 	dataset, err := zfs.GetDataset(d.ZfsPath(id))
 	if dataset == nil {
 		return err
 	}
 
-	return dataset.Destroy(/* recursive */ true, /* deferred */ false)
+	return dataset.Destroy( /* recursive */ true /* deferred */, false)
 }
 
 func (d *Driver) Get(id, mountLabel string) (string, error) {
-	log.Debugf("d->Get(%s, %s)", id, mountLabel)
 	dataset, err := zfs.GetDataset(d.ZfsPath(id))
 	if dataset == nil {
 		return "", err
@@ -237,12 +238,10 @@ func (d *Driver) Get(id, mountLabel string) (string, error) {
 }
 
 func (d *Driver) Put(id string) {
-	log.Debugf("d->Id(%s)", id)
 	// FS is already mounted
 }
 
 func (d *Driver) Exists(id string) bool {
-	log.Debugf("d->Exists(%s)", id)
 	_, err := zfs.GetDataset(d.ZfsPath(id))
 	return err != nil
 }
@@ -291,7 +290,6 @@ func zfsChanges(dataset *zfs.Dataset) ([]archive.Change, error) {
 }
 
 func (d *Driver) Diff(id string) (archive.Archive, error) {
-	log.Debugf("d->Diff(%s)", id)
 	dataset, err := zfs.GetDataset(d.ZfsPath(id))
 	if err != nil {
 		return nil, err
@@ -313,7 +311,6 @@ func (d *Driver) Diff(id string) (archive.Archive, error) {
 }
 
 func (d *Driver) DiffSize(id string) (bytes int64, err error) {
-	log.Debugf("d->DiffSize(%s)", id)
 	dataset, err := zfs.GetDataset(d.ZfsPath(id))
 	if err == nil {
 		return int64((*dataset).Logicalused), nil
@@ -323,7 +320,6 @@ func (d *Driver) DiffSize(id string) (bytes int64, err error) {
 }
 
 func (d *Driver) Changes(id string) ([]archive.Change, error) {
-	log.Debugf("d->Changes(%s)", id)
 	dataset, err := zfs.GetDataset(d.ZfsPath(id))
 	if err != nil {
 		return nil, err
