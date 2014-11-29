@@ -69,7 +69,7 @@ func Init(base string, opt []string) (graphdriver.Driver, error) {
 	}
 
 	if options.fsName == "" {
-		options.fsName, err = lookupZfsPool(rootdir)
+		options.fsName, err = lookupZfsDataset(rootdir)
 		if err != nil {
 			return nil, err
 		}
@@ -124,7 +124,7 @@ func checkRootdirFs(rootdir string) error {
 var CprocMounts = C.CString("/proc/mounts")
 var CopenMod = C.CString("r")
 
-func lookupZfsPool(rootdir string) (string, error) {
+func lookupZfsDataset(rootdir string) (string, error) {
 	var stat syscall.Stat_t
 	var Cmnt C.struct_mntent
 	var Cfp *C.FILE
@@ -145,10 +145,12 @@ func lookupZfsPool(rootdir string) (string, error) {
 	for C.getmntent_r(Cfp, &Cmnt, Cbuf, 256) != nil {
 		dir := C.GoString(Cmnt.mnt_dir)
 		if err := syscall.Stat(dir, &stat); err != nil {
-			return "", err
+			log.Debugf("[zfs] failed to stat '%s' while scanning for zfs mount: %v", dir, err)
+			continue // may fail on fuse file systems
 		}
 
-		if stat.Dev == wantedDev {
+		fs := C.GoString(Cmnt.mnt_type)
+		if stat.Dev == wantedDev && fs == "zfs" {
 			return C.GoString(Cmnt.mnt_fsname), nil
 		}
 	}
