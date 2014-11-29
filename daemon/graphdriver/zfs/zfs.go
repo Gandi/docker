@@ -194,10 +194,10 @@ func cloneFilesystem(id, parent, mountpoint string) error {
 		"mountpoint": mountpoint,
 	})
 	if err != nil {
-		snapshot.Destroy( /*recursive*/ false /*deferred*/, true)
+		snapshot.Destroy(zfs.DESTROY_DEFER_DELETION)
 		return err
 	}
-	err = snapshot.Destroy( /*recursive*/ false /*deferred*/, true)
+	err = snapshot.Destroy(zfs.DESTROY_DEFER_DELETION)
 	return err
 }
 
@@ -207,13 +207,20 @@ func (d *Driver) ZfsPath(id string) string {
 
 func (d *Driver) Create(id string, parent string) error {
 	mountPoint := path.Join(d.options.mountPath, "graph", id)
+	datasetName := d.ZfsPath(id)
+	dataset, err := zfs.GetDataset(datasetName)
+	if err == nil {
+		// cleanup existing dataset from an aborted build
+		dataset.Destroy(zfs.DESTROY_RECURSIVE_CLONES)
+	}
+
 	if parent == "" {
-		_, err := zfs.CreateFilesystem(d.ZfsPath(id), map[string]string{
+		_, err := zfs.CreateFilesystem(datasetName, map[string]string{
 			"mountpoint": mountPoint,
 		})
 		return err
 	} else {
-		return cloneFilesystem(d.ZfsPath(id), d.ZfsPath(parent), mountPoint)
+		return cloneFilesystem(datasetName, d.ZfsPath(parent), mountPoint)
 	}
 	return nil
 }
@@ -224,7 +231,7 @@ func (d *Driver) Remove(id string) error {
 		return err
 	}
 
-	return dataset.Destroy( /* recursive */ true /* deferred */, false)
+	return dataset.Destroy(zfs.DESTROY_RECURSIVE)
 }
 
 func (d *Driver) Get(id, mountLabel string) (string, error) {
