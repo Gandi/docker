@@ -19,10 +19,10 @@ import (
 	"unsafe"
 
 	zfs "github.com/Mic92/go-zfs"
-	"github.com/docker/docker/archive"
+	log "github.com/Sirupsen/logrus"
 	"github.com/docker/docker/daemon/graphdriver"
+	"github.com/docker/docker/pkg/archive"
 	"github.com/docker/docker/pkg/ioutils"
-	"github.com/docker/docker/pkg/log"
 	"github.com/docker/docker/pkg/parsers"
 )
 
@@ -287,7 +287,7 @@ func zfsChanges(dataset *zfs.Dataset) ([]archive.Change, error) {
 	return archiveChanges, nil
 }
 
-func (d *Driver) Diff(id string) (archive.Archive, error) {
+func (d *Driver) Diff(id, parent string) (archive.Archive, error) {
 	dataset, err := zfs.GetDataset(d.ZfsPath(id))
 	if err != nil {
 		return nil, err
@@ -308,7 +308,7 @@ func (d *Driver) Diff(id string) (archive.Archive, error) {
 	}), nil
 }
 
-func (d *Driver) DiffSize(id string) (bytes int64, err error) {
+func (d *Driver) DiffSize(id, parent string) (bytes int64, err error) {
 	dataset, err := zfs.GetDataset(d.ZfsPath(id))
 	if err == nil {
 		return int64((*dataset).Logicalused), nil
@@ -317,7 +317,7 @@ func (d *Driver) DiffSize(id string) (bytes int64, err error) {
 	}
 }
 
-func (d *Driver) Changes(id string) ([]archive.Change, error) {
+func (d *Driver) Changes(id, parent string) ([]archive.Change, error) {
 	dataset, err := zfs.GetDataset(d.ZfsPath(id))
 	if err != nil {
 		return nil, err
@@ -325,10 +325,18 @@ func (d *Driver) Changes(id string) ([]archive.Change, error) {
 	return zfsChanges(dataset)
 }
 
-func (d *Driver) ApplyDiff(id string, diff archive.ArchiveReader) error {
+func (d *Driver) ApplyDiff(id, parent string, diff archive.ArchiveReader) (int64, error) {
 	dataset, err := zfs.GetDataset(d.ZfsPath(id))
 	if err != nil {
-		return err
+		return -1, err
 	}
-	return archive.ApplyLayer(dataset.Mountpoint, diff)
+	err = archive.ApplyLayer(dataset.Mountpoint, diff)
+	if err != nil {
+		return -1, err
+	}
+	updatedDataset, err := zfs.GetDataset(d.ZfsPath(id))
+	if err != nil {
+		return -1, err
+	}
+	return int64(updatedDataset.Logicalused), nil
 }
