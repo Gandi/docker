@@ -80,7 +80,7 @@ func Init(base string, opt []string) (graphdriver.Driver, error) {
 
 	dataset, err := zfs.GetDataset(options.fsName)
 	if err != nil {
-		return nil, fmt.Errorf("")
+		return nil, fmt.Errorf("Cannot open %s", options.fsName)
 	}
 
 	return &Driver{
@@ -115,10 +115,9 @@ func checkRootdirFs(rootdir string) error {
 	}
 
 	if graphdriver.FsMagic(buf.Type) != graphdriver.FsMagicZfs {
-		log.Debugf("[zfs] no zpool found for rootdir '%s'", rootdir)
+		log.Debugf("[zfs] no zfs dataset found for rootdir '%s'", rootdir)
 		return graphdriver.ErrPrerequisites
 	}
-	log.Debugf("[zfs] no zpool found for rootdir '%s'", rootdir)
 	return nil
 }
 
