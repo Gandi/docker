@@ -55,7 +55,7 @@ clone git github.com/docker/libtrust 230dfd18c232
 
 clone git github.com/Sirupsen/logrus v0.6.0
 
-clone git github.com/Mic92/go-zfs 129db50d27e1710427
+clone git github.com/Mic92/go-zfs b21e11a7479631c
 
 # get Go tip's archive/tar, for xattr support and improved performance
 # TODO after Go 1.4 drops, bump our minimum supported version and drop this vendored dep

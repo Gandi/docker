@@ -194,10 +194,10 @@ func cloneFilesystem(id, parent, mountpoint string) error {
 		"mountpoint": mountpoint,
 	})
 	if err != nil {
-		snapshot.Destroy(zfs.DESTROY_DEFER_DELETION)
+		snapshot.Destroy(zfs.DestroyDeferDeletion)
 		return err
 	}
-	err = snapshot.Destroy(zfs.DESTROY_DEFER_DELETION)
+	err = snapshot.Destroy(zfs.DestroyDeferDeletion)
 	return err
 }
 
@@ -211,7 +211,7 @@ func (d *Driver) Create(id string, parent string) error {
 	dataset, err := zfs.GetDataset(datasetName)
 	if err == nil {
 		// cleanup existing dataset from an aborted build
-		dataset.Destroy(zfs.DESTROY_RECURSIVE_CLONES)
+		dataset.Destroy(zfs.DestroyRecursiveClones)
 	}
 
 	if parent == "" {
@@ -231,7 +231,7 @@ func (d *Driver) Remove(id string) error {
 		return err
 	}
 
-	return dataset.Destroy(zfs.DESTROY_RECURSIVE)
+	return dataset.Destroy(zfs.DestroyRecursive)
 }
 
 func (d *Driver) Get(id, mountLabel string) (string, error) {
@@ -264,7 +264,7 @@ func zfsChanges(dataset *zfs.Dataset) ([]archive.Change, error) {
 	// for rename changes, we have to add a ADD and a REMOVE
 	renameCount := 0
 	for _, change := range changes {
-		if change.Change == zfs.RENAMED {
+		if change.Change == zfs.Renamed {
 			renameCount++
 		}
 	}
@@ -275,17 +275,17 @@ func zfsChanges(dataset *zfs.Dataset) ([]archive.Change, error) {
 		mountpointLen := len(dataset.Mountpoint)
 		basePath := change.Path[mountpointLen:]
 		switch change.Change {
-		case zfs.RENAMED:
+		case zfs.Renamed:
 			archiveChanges[i] = archive.Change{basePath, archive.ChangeDelete}
 			newBasePath := change.NewPath[mountpointLen:]
 			archiveChanges[i+1] = archive.Change{newBasePath, archive.ChangeAdd}
 			i += 2
 			continue
-		case zfs.CREATED:
+		case zfs.Created:
 			changeType = archive.ChangeAdd
-		case zfs.MODIFIED:
+		case zfs.Modified:
 			changeType = archive.ChangeModify
-		case zfs.REMOVED:
+		case zfs.Removed:
 			changeType = archive.ChangeDelete
 		}
 		archiveChanges[i] = archive.Change{basePath, changeType}
