@@ -2,20 +2,20 @@ package broadcastwriter
 
 import (
 	"bytes"
-	"encoding/json"
 	"io"
 	"sync"
 	"time"
 
+	log "github.com/Sirupsen/logrus"
 	"github.com/docker/docker/pkg/jsonlog"
-	"github.com/docker/docker/pkg/log"
 )
 
 // BroadcastWriter accumulate multiple io.WriteCloser by stream.
 type BroadcastWriter struct {
 	sync.Mutex
-	buf     *bytes.Buffer
-	streams map[string](map[io.WriteCloser]struct{})
+	buf      *bytes.Buffer
+	jsLogBuf *bytes.Buffer
+	streams  map[string](map[io.WriteCloser]struct{})
 }
 
 // AddWriter adds new io.WriteCloser for stream.
@@ -43,6 +43,10 @@ func (w *BroadcastWriter) Write(p []byte) (n int, err error) {
 			}
 		}
 	}
+	if w.jsLogBuf == nil {
+		w.jsLogBuf = new(bytes.Buffer)
+		w.jsLogBuf.Grow(1024)
+	}
 	w.buf.Write(p)
 	for {
 		line, err := w.buf.ReadString('\n')
@@ -54,19 +58,23 @@ func (w *BroadcastWriter) Write(p []byte) (n int, err error) {
 			if stream == "" {
 				continue
 			}
-			b, err := json.Marshal(jsonlog.JSONLog{Log: line, Stream: stream, Created: created})
+			jsonLog := jsonlog.JSONLog{Log: line, Stream: stream, Created: created}
+			err = jsonLog.MarshalJSONBuf(w.jsLogBuf)
 			if err != nil {
 				log.Errorf("Error making JSON log line: %s", err)
 				continue
 			}
-			b = append(b, '\n')
+			w.jsLogBuf.WriteByte('\n')
+			b := w.jsLogBuf.Bytes()
 			for sw := range writers {
 				if _, err := sw.Write(b); err != nil {
 					delete(writers, sw)
 				}
 			}
 		}
+		w.jsLogBuf.Reset()
 	}
+	w.jsLogBuf.Reset()
 	w.Unlock()
 	return len(p), nil
 }

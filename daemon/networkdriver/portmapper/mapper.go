@@ -4,9 +4,9 @@ import (
 	"errors"
 	"fmt"
 	"net"
-	"strings"
 	"sync"
 
+	log "github.com/Sirupsen/logrus"
 	"github.com/docker/docker/daemon/networkdriver/portallocator"
 	"github.com/docker/docker/pkg/iptables"
 )
@@ -97,16 +97,25 @@ func Map(container net.Addr, hostIP net.IP, hostPort int) (host net.Addr, err er
 		return nil, err
 	}
 
-	m.userlandProxy = proxy
-	currentMappings[key] = m
-
-	if err := proxy.Start(); err != nil {
+	cleanup := func() error {
 		// need to undo the iptables rules before we return
+		proxy.Stop()
 		forward(iptables.Delete, m.proto, hostIP, allocatedHostPort, containerIP.String(), containerPort)
+		if err := portallocator.ReleasePort(hostIP, m.proto, allocatedHostPort); err != nil {
+			return err
+		}
 
-		return nil, err
+		return nil
 	}
 
+	if err := proxy.Start(); err != nil {
+		if err := cleanup(); err != nil {
+			return nil, fmt.Errorf("Error during port allocation cleanup: %v", err)
+		}
+		return nil, err
+	}
+	m.userlandProxy = proxy
+	currentMappings[key] = m
 	return m.host, nil
 }
 
@@ -127,10 +136,7 @@ func Unmap(host net.Addr) error {
 	containerIP, containerPort := getIPAndPort(data.container)
 	hostIP, hostPort := getIPAndPort(data.host)
 	if err := forward(iptables.Delete, data.proto, hostIP, hostPort, containerIP.String(), containerPort); err != nil {
-		// skip "no chain" errors because we can safely release port in this case
-		if !strings.Contains(err.Error(), "No chain/target/match by that name") {
-			return err
-		}
+		log.Errorf("Error on iptables delete: %s", err)
 	}
 
 	switch a := host.(type) {
@@ -139,7 +145,6 @@ func Unmap(host net.Addr) error {
 	case *net.UDPAddr:
 		return portallocator.ReleasePort(a.IP, "udp", a.Port)
 	}
-
 	return nil
 }
 

@@ -4,10 +4,12 @@ import (
 	"errors"
 	"fmt"
 	"net"
-	"os"
 	"os/exec"
+	"regexp"
 	"strconv"
 	"strings"
+
+	log "github.com/Sirupsen/logrus"
 )
 
 type Action string
@@ -18,14 +20,23 @@ const (
 )
 
 var (
-	ErrIptablesNotFound = errors.New("Iptables not found")
 	nat                 = []string{"-t", "nat"}
 	supportsXlock       = false
+	ErrIptablesNotFound = errors.New("Iptables not found")
 )
 
 type Chain struct {
 	Name   string
 	Bridge string
+}
+
+type ChainError struct {
+	Chain  string
+	Output []byte
+}
+
+func (e *ChainError) Error() string {
+	return fmt.Sprintf("Error iptables %s: %s", e.Chain, string(e.Output))
 }
 
 func init() {
@@ -76,7 +87,7 @@ func (c *Chain) Forward(action Action, ip net.IP, port int, proto, dest_addr str
 		"--to-destination", net.JoinHostPort(dest_addr, strconv.Itoa(dest_port))); err != nil {
 		return err
 	} else if len(output) != 0 {
-		return fmt.Errorf("Error iptables forward: %s", output)
+		return &ChainError{Chain: "FORWARD", Output: output}
 	}
 
 	fAction := action
@@ -92,7 +103,7 @@ func (c *Chain) Forward(action Action, ip net.IP, port int, proto, dest_addr str
 		"-j", "ACCEPT"); err != nil {
 		return err
 	} else if len(output) != 0 {
-		return fmt.Errorf("Error iptables forward: %s", output)
+		return &ChainError{Chain: "FORWARD", Output: output}
 	}
 
 	return nil
@@ -106,7 +117,7 @@ func (c *Chain) Prerouting(action Action, args ...string) error {
 	if output, err := Raw(append(a, "-j", c.Name)...); err != nil {
 		return err
 	} else if len(output) != 0 {
-		return fmt.Errorf("Error iptables prerouting: %s", output)
+		return &ChainError{Chain: "PREROUTING", Output: output}
 	}
 	return nil
 }
@@ -119,7 +130,7 @@ func (c *Chain) Output(action Action, args ...string) error {
 	if output, err := Raw(append(a, "-j", c.Name)...); err != nil {
 		return err
 	} else if len(output) != 0 {
-		return fmt.Errorf("Error iptables output: %s", output)
+		return &ChainError{Chain: "OUTPUT", Output: output}
 	}
 	return nil
 }
@@ -141,10 +152,27 @@ func (c *Chain) Remove() error {
 
 // Check if an existing rule exists
 func Exists(args ...string) bool {
-	if _, err := Raw(append([]string{"-C"}, args...)...); err != nil {
-		return false
+	// iptables -C, --check option was added in v.1.4.11
+	// http://ftp.netfilter.org/pub/iptables/changes-iptables-1.4.11.txt
+
+	// try -C
+	// if exit status is 0 then return true, the rule exists
+	if _, err := Raw(append([]string{"-C"}, args...)...); err == nil {
+		return true
 	}
-	return true
+
+	// parse iptables-save for the rule
+	rule := strings.Replace(strings.Join(args, " "), "-t nat ", "", -1)
+	existingRules, _ := exec.Command("iptables-save").Output()
+
+	// regex to replace ips in rule
+	// because MASQUERADE rule will not be exactly what was passed
+	re := regexp.MustCompile(`[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\/[0-9]{1,2}`)
+
+	return strings.Contains(
+		re.ReplaceAllString(string(existingRules), "?"),
+		re.ReplaceAllString(rule, "?"),
+	)
 }
 
 func Raw(args ...string) ([]byte, error) {
@@ -157,9 +185,7 @@ func Raw(args ...string) ([]byte, error) {
 		args = append([]string{"--wait"}, args...)
 	}
 
-	if os.Getenv("DEBUG") != "" {
-		fmt.Fprintf(os.Stderr, fmt.Sprintf("[debug] %s, %v\n", path, args))
-	}
+	log.Debugf("%s, %v", path, args)
 
 	output, err := exec.Command(path, args...).CombinedOutput()
 	if err != nil {

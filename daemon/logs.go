@@ -7,13 +7,13 @@ import (
 	"io"
 	"os"
 	"strconv"
-	"time"
+	"sync"
 
-	"github.com/docker/docker/pkg/log"
-	"github.com/docker/docker/pkg/tailfile"
-
+	log "github.com/Sirupsen/logrus"
 	"github.com/docker/docker/engine"
 	"github.com/docker/docker/pkg/jsonlog"
+	"github.com/docker/docker/pkg/tailfile"
+	"github.com/docker/docker/pkg/timeutils"
 )
 
 func (daemon *Daemon) ContainerLogs(job *engine.Job) engine.Status {
@@ -35,7 +35,7 @@ func (daemon *Daemon) ContainerLogs(job *engine.Job) engine.Status {
 		return job.Errorf("You must choose at least one stream")
 	}
 	if times {
-		format = time.RFC3339Nano
+		format = timeutils.RFC3339NanoFixed
 	}
 	if tail == "" {
 		tail = "all"
@@ -89,9 +89,8 @@ func (daemon *Daemon) ContainerLogs(job *engine.Job) engine.Status {
 				cLog = tmp
 			}
 			dec := json.NewDecoder(cLog)
+			l := &jsonlog.JSONLog{}
 			for {
-				l := &jsonlog.JSONLog{}
-
 				if err := dec.Decode(l); err == io.EOF {
 					break
 				} else if err != nil {
@@ -103,32 +102,47 @@ func (daemon *Daemon) ContainerLogs(job *engine.Job) engine.Status {
 					logLine = fmt.Sprintf("%s %s", l.Created.Format(format), logLine)
 				}
 				if l.Stream == "stdout" && stdout {
-					fmt.Fprintf(job.Stdout, "%s", logLine)
+					io.WriteString(job.Stdout, logLine)
 				}
 				if l.Stream == "stderr" && stderr {
-					fmt.Fprintf(job.Stderr, "%s", logLine)
+					io.WriteString(job.Stderr, logLine)
 				}
+				l.Reset()
 			}
 		}
 	}
 	if follow && container.IsRunning() {
 		errors := make(chan error, 2)
+		wg := sync.WaitGroup{}
+
 		if stdout {
+			wg.Add(1)
 			stdoutPipe := container.StdoutLogPipe()
+			defer stdoutPipe.Close()
 			go func() {
 				errors <- jsonlog.WriteLog(stdoutPipe, job.Stdout, format)
+				wg.Done()
 			}()
 		}
 		if stderr {
+			wg.Add(1)
 			stderrPipe := container.StderrLogPipe()
+			defer stderrPipe.Close()
 			go func() {
 				errors <- jsonlog.WriteLog(stderrPipe, job.Stderr, format)
+				wg.Done()
 			}()
 		}
-		err := <-errors
-		if err != nil {
-			log.Errorf("%s", err)
+
+		wg.Wait()
+		close(errors)
+
+		for err := range errors {
+			if err != nil {
+				log.Errorf("%s", err)
+			}
 		}
+
 	}
 	return engine.StatusOK
 }

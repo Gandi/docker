@@ -27,6 +27,8 @@ func (daemon *Daemon) ContainerStart(job *engine.Job) engine.Status {
 	}
 
 	// If no environment was set, then no hostconfig was passed.
+	// This is kept for backward compatibility - hostconfig should be passed when
+	// creating a container, not during start.
 	if len(job.Environ()) > 0 {
 		hostConfig := runconfig.ContainerHostConfigFromJob(job)
 		if err := daemon.setHostConfig(container, hostConfig); err != nil {
@@ -34,6 +36,7 @@ func (daemon *Daemon) ContainerStart(job *engine.Job) engine.Status {
 		}
 	}
 	if err := container.Start(); err != nil {
+		container.LogEvent("die")
 		return job.Errorf("Cannot start container %s: %s", name, err)
 	}
 
@@ -41,6 +44,9 @@ func (daemon *Daemon) ContainerStart(job *engine.Job) engine.Status {
 }
 
 func (daemon *Daemon) setHostConfig(container *Container, hostConfig *runconfig.HostConfig) error {
+	if err := parseSecurityOpt(container, hostConfig); err != nil {
+		return err
+	}
 	// Validate the HostConfig binds. Make sure that:
 	// the source exists
 	for _, bind := range hostConfig.Binds {

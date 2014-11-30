@@ -13,30 +13,22 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 
+	log "github.com/Sirupsen/logrus"
 	"github.com/docker/docker/dockerversion"
+	"github.com/docker/docker/pkg/archive"
+	"github.com/docker/docker/pkg/fileutils"
 	"github.com/docker/docker/pkg/ioutils"
-	"github.com/docker/docker/pkg/log"
 )
 
 type KeyValuePair struct {
 	Key   string
 	Value string
-}
-
-// Go is a basic promise implementation: it wraps calls a function in a goroutine,
-// and returns a channel which will later return the function's return value.
-func Go(f func() error) chan error {
-	ch := make(chan error, 1)
-	go func() {
-		ch <- f()
-	}()
-	return ch
 }
 
 // Request a given URL and return an io.Reader
@@ -258,14 +250,6 @@ func HashData(src io.Reader) (string, error) {
 	return "sha256:" + hex.EncodeToString(h.Sum(nil)), nil
 }
 
-// FIXME: this is deprecated by CopyWithTar in archive.go
-func CopyDirectory(source, dest string) error {
-	if output, err := exec.Command("cp", "-ra", source, dest).CombinedOutput(); err != nil {
-		return fmt.Errorf("Error copy: %s (%s)", err, output)
-	}
-	return nil
-}
-
 type WriteFlusher struct {
 	sync.Mutex
 	w       io.Writer
@@ -304,47 +288,12 @@ func NewHTTPRequestError(msg string, res *http.Response) error {
 	}
 }
 
-func IsURL(str string) bool {
-	return strings.HasPrefix(str, "http://") || strings.HasPrefix(str, "https://")
-}
+var localHostRx = regexp.MustCompile(`(?m)^nameserver 127[^\n]+\n*`)
 
-func IsGIT(str string) bool {
-	return strings.HasPrefix(str, "git://") || strings.HasPrefix(str, "github.com/") || strings.HasPrefix(str, "git@github.com:") || (strings.HasSuffix(str, ".git") && IsURL(str))
-}
-
-// CheckLocalDns looks into the /etc/resolv.conf,
-// it returns true if there is a local nameserver or if there is no nameserver.
-func CheckLocalDns(resolvConf []byte) bool {
-	for _, line := range GetLines(resolvConf, []byte("#")) {
-		if !bytes.Contains(line, []byte("nameserver")) {
-			continue
-		}
-		for _, ip := range [][]byte{
-			[]byte("127.0.0.1"),
-			[]byte("127.0.1.1"),
-		} {
-			if bytes.Contains(line, ip) {
-				return true
-			}
-		}
-		return false
-	}
-	return true
-}
-
-// GetLines parses input into lines and strips away comments.
-func GetLines(input []byte, commentMarker []byte) [][]byte {
-	lines := bytes.Split(input, []byte("\n"))
-	var output [][]byte
-	for _, currentLine := range lines {
-		var commentIndex = bytes.Index(currentLine, commentMarker)
-		if commentIndex == -1 {
-			output = append(output, currentLine)
-		} else {
-			output = append(output, currentLine[:commentIndex])
-		}
-	}
-	return output
+// RemoveLocalDns looks into the /etc/resolv.conf,
+// and removes any local nameserver entries.
+func RemoveLocalDns(resolvConf []byte) []byte {
+	return localHostRx.ReplaceAll(resolvConf, []byte{})
 }
 
 // An StatusError reports an unsuccessful exit by a command.
@@ -410,7 +359,7 @@ func TestDirectory(templateDir string) (dir string, err error) {
 		return
 	}
 	if templateDir != "" {
-		if err = CopyDirectory(templateDir, dir); err != nil {
+		if err = archive.CopyWithTar(templateDir, dir); err != nil {
 			return
 		}
 	}
@@ -489,82 +438,48 @@ func ReadSymlinkedDirectory(path string) (string, error) {
 	return realPath, nil
 }
 
-// TreeSize walks a directory tree and returns its total size in bytes.
-func TreeSize(dir string) (size int64, err error) {
-	data := make(map[uint64]struct{})
-	err = filepath.Walk(dir, func(d string, fileInfo os.FileInfo, e error) error {
-		// Ignore directory sizes
-		if fileInfo == nil {
-			return nil
-		}
-
-		s := fileInfo.Size()
-		if fileInfo.IsDir() || s == 0 {
-			return nil
-		}
-
-		// Check inode to handle hard links correctly
-		inode := fileInfo.Sys().(*syscall.Stat_t).Ino
-		// inode is not a uint64 on all platforms. Cast it to avoid issues.
-		if _, exists := data[uint64(inode)]; exists {
-			return nil
-		}
-		// inode is not a uint64 on all platforms. Cast it to avoid issues.
-		data[uint64(inode)] = struct{}{}
-
-		size += s
-
-		return nil
-	})
-	return
-}
-
 // ValidateContextDirectory checks if all the contents of the directory
 // can be read and returns an error if some files can't be read
 // symlinks which point to non-existing files don't trigger an error
 func ValidateContextDirectory(srcPath string, excludes []string) error {
-	var finalError error
-
-	filepath.Walk(filepath.Join(srcPath, "."), func(filePath string, f os.FileInfo, err error) error {
+	return filepath.Walk(filepath.Join(srcPath, "."), func(filePath string, f os.FileInfo, err error) error {
 		// skip this directory/file if it's not in the path, it won't get added to the context
-		relFilePath, err := filepath.Rel(srcPath, filePath)
-		if err != nil && os.IsPermission(err) {
-			return nil
-		}
-
-		skip, err := Matches(relFilePath, excludes)
-		if err != nil {
-			finalError = err
-		}
-		if skip {
+		if relFilePath, err := filepath.Rel(srcPath, filePath); err != nil {
+			return err
+		} else if skip, err := fileutils.Matches(relFilePath, excludes); err != nil {
+			return err
+		} else if skip {
 			if f.IsDir() {
 				return filepath.SkipDir
 			}
 			return nil
 		}
 
-		if _, err := os.Stat(filePath); err != nil && os.IsPermission(err) {
-			finalError = fmt.Errorf("can't stat '%s'", filePath)
+		if err != nil {
+			if os.IsPermission(err) {
+				return fmt.Errorf("can't stat '%s'", filePath)
+			}
+			if os.IsNotExist(err) {
+				return nil
+			}
 			return err
 		}
+
 		// skip checking if symlinks point to non-existing files, such symlinks can be useful
 		// also skip named pipes, because they hanging on open
-		lstat, _ := os.Lstat(filePath)
-		if lstat != nil && lstat.Mode()&(os.ModeSymlink|os.ModeNamedPipe) != 0 {
+		if f.Mode()&(os.ModeSymlink|os.ModeNamedPipe) != 0 {
 			return nil
 		}
 
 		if !f.IsDir() {
 			currentFile, err := os.Open(filePath)
 			if err != nil && os.IsPermission(err) {
-				finalError = fmt.Errorf("no permission to read from '%s'", filePath)
-				return err
+				return fmt.Errorf("no permission to read from '%s'", filePath)
 			}
 			currentFile.Close()
 		}
 		return nil
 	})
-	return finalError
 }
 
 func StringsContainsNoCase(slice []string, s string) bool {
@@ -574,24 +489,4 @@ func StringsContainsNoCase(slice []string, s string) bool {
 		}
 	}
 	return false
-}
-
-// Matches returns true if relFilePath matches any of the patterns
-func Matches(relFilePath string, patterns []string) (bool, error) {
-	for _, exclude := range patterns {
-		matched, err := filepath.Match(exclude, relFilePath)
-		if err != nil {
-			log.Errorf("Error matching: %s (pattern: %s)", relFilePath, exclude)
-			return false, err
-		}
-		if matched {
-			if filepath.Clean(relFilePath) == "." {
-				log.Errorf("Can't exclude whole path, excluding pattern: %s", exclude)
-				continue
-			}
-			log.Debugf("Skipping excluded path: %s", relFilePath)
-			return true, nil
-		}
-	}
-	return false, nil
 }

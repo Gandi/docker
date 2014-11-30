@@ -9,23 +9,25 @@ type ThrottlingData struct {
 	ThrottledTime uint64 `json:"throttled_time,omitempty"`
 }
 
+// All CPU stats are aggregate since container inception.
 type CpuUsage struct {
-	// percentage of available CPUs currently being used.
-	PercentUsage uint64 `json:"percent_usage,omitempty"`
-	// nanoseconds of cpu time consumed over the last 100 ms.
-	CurrentUsage uint64 `json:"current_usage,omitempty"`
-	// total nanoseconds of cpu time consumed
-	TotalUsage  uint64   `json:"total_usage,omitempty"`
+	// Total CPU time consumed.
+	// Units: nanoseconds.
+	TotalUsage uint64 `json:"total_usage,omitempty"`
+	// Total CPU time consumed per core.
+	// Units: nanoseconds.
 	PercpuUsage []uint64 `json:"percpu_usage,omitempty"`
-	// Time spent by tasks of the cgroup in kernel mode. Units: nanoseconds.
+	// Time spent by tasks of the cgroup in kernel mode.
+	// Units: nanoseconds.
 	UsageInKernelmode uint64 `json:"usage_in_kernelmode"`
-	// Time spent by tasks of the cgroup in user mode. Units: nanoseconds.
+	// Time spent by tasks of the cgroup in user mode.
+	// Units: nanoseconds.
 	UsageInUsermode uint64 `json:"usage_in_usermode"`
 }
 
 type CpuStats struct {
 	CpuUsage       CpuUsage       `json:"cpu_usage,omitempty"`
-	ThrottlingData ThrottlingData `json:"throlling_data,omitempty"`
+	ThrottlingData ThrottlingData `json:"throttling_data,omitempty"`
 }
 
 type MemoryStats struct {
@@ -50,8 +52,12 @@ type BlkioStatEntry struct {
 type BlkioStats struct {
 	// number of bytes tranferred to and from the block device
 	IoServiceBytesRecursive []BlkioStatEntry `json:"io_service_bytes_recursive,omitempty"`
-	IoServicedRecursive     []BlkioStatEntry `json:"io_serviced_recusrive,omitempty"`
+	IoServicedRecursive     []BlkioStatEntry `json:"io_serviced_recursive,omitempty"`
 	IoQueuedRecursive       []BlkioStatEntry `json:"io_queue_recursive,omitempty"`
+	IoServiceTimeRecursive  []BlkioStatEntry `json:"io_service_time_recursive,omitempty"`
+	IoWaitTimeRecursive     []BlkioStatEntry `json:"io_wait_time_recursive,omitempty"`
+	IoMergedRecursive       []BlkioStatEntry `json:"io_merged_recursive,omitempty"`
+	IoTimeRecursive         []BlkioStatEntry `json:"io_time_recursive,omitempty"`
 	SectorsRecursive        []BlkioStatEntry `json:"sectors_recursive,omitempty"`
 }
 

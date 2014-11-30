@@ -25,9 +25,9 @@ The `docker` client is pretty simple. Each action you can take
 with Docker is a command and each command can take a series of
 flags and arguments.
 
-    # Usage:  [sudo] docker [flags] [command] [arguments] ..
+    # Usage:  [sudo] docker [command] [flags] [arguments] ..
     # Example:
-    $ docker run -i -t ubuntu /bin/bash
+    $ sudo docker run -i -t ubuntu /bin/bash
 
 Let's see this in action by using the `docker version` command to return
 version information on the currently installed Docker client and daemon.
@@ -85,7 +85,7 @@ This will display the help text and all available flags:
     Attach to a running container
 
       --no-stdin=false: Do not attach stdin
-      --sig-proxy=true: Proxify all received signal to the process (even in non-tty mode)
+      --sig-proxy=true: Proxify all received signal to the process (non-TTY mode only)
 
 > **Note:** 
 > You can see a full list of Docker's commands
@@ -114,8 +114,7 @@ We've specified an image: `training/webapp`. This image is a
 pre-built image we've created that contains a simple Python Flask web
 application.
 
-Lastly, we've specified a command for our container to run: `python
-app.py`. This launches our web application.
+Lastly, we've specified a command for our container to run: `python app.py`. This launches our web application.
 
 > **Note:** 
 > You can see more detail on the `docker run` command in the [command
@@ -157,7 +156,7 @@ port) on port 49155.
 
 Network port bindings are very configurable in Docker. In our last
 example the `-P` flag is a shortcut for `-p 5000` that maps port 5000
-inside the container to a high port (from the range 49000 to 49900) on
+inside the container to a high port (from the range 49153 to 65535) on
 the local Docker host. We can also bind Docker containers to specific
 ports using the `-p` flag, for example:
 

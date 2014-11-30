@@ -2,6 +2,7 @@ package lxc
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -16,16 +17,17 @@ import (
 
 	"github.com/kr/pty"
 
+	log "github.com/Sirupsen/logrus"
 	"github.com/docker/docker/daemon/execdriver"
-	"github.com/docker/docker/pkg/log"
 	"github.com/docker/docker/pkg/term"
 	"github.com/docker/docker/utils"
 	"github.com/docker/libcontainer/cgroups"
-	"github.com/docker/libcontainer/label"
 	"github.com/docker/libcontainer/mount/nodes"
 )
 
 const DriverName = "lxc"
+
+var ErrExec = errors.New("Unsupported: Exec is not supported by the lxc driver")
 
 type driver struct {
 	root       string // root path for the driver to use
@@ -53,7 +55,7 @@ func (d *driver) Name() string {
 	return fmt.Sprintf("%s-%s", DriverName, version)
 }
 
-func (d *driver) Run(c *execdriver.Command, pipes *execdriver.Pipes, startCallback execdriver.StartCallback) (int, error) {
+func (d *driver) Run(c *execdriver.Command, pipes *execdriver.Pipes, startCallback execdriver.StartCallback) (execdriver.ExitStatus, error) {
 	var (
 		term execdriver.Terminal
 		err  error
@@ -74,20 +76,27 @@ func (d *driver) Run(c *execdriver.Command, pipes *execdriver.Pipes, startCallba
 	})
 
 	if err := d.generateEnvConfig(c); err != nil {
-		return -1, err
+		return execdriver.ExitStatus{-1, false}, err
 	}
 	configPath, err := d.generateLXCConfig(c)
 	if err != nil {
-		return -1, err
+		return execdriver.ExitStatus{-1, false}, err
 	}
 	params := []string{
 		"lxc-start",
 		"-n", c.ID,
 		"-f", configPath,
-		"--",
-		c.InitPath,
+	}
+	if c.Network.ContainerID != "" {
+		params = append(params,
+			"--share-net", c.Network.ContainerID,
+		)
 	}
 
+	params = append(params,
+		"--",
+		c.InitPath,
+	)
 	if c.Network.Interface != nil {
 		params = append(params,
 			"-g", c.Network.Interface.Gateway,
@@ -153,11 +162,11 @@ func (d *driver) Run(c *execdriver.Command, pipes *execdriver.Pipes, startCallba
 	c.ProcessConfig.Args = append([]string{name}, arg...)
 
 	if err := nodes.CreateDeviceNodes(c.Rootfs, c.AutoCreatedDevices); err != nil {
-		return -1, err
+		return execdriver.ExitStatus{-1, false}, err
 	}
 
 	if err := c.ProcessConfig.Start(); err != nil {
-		return -1, err
+		return execdriver.ExitStatus{-1, false}, err
 	}
 
 	var (
@@ -181,7 +190,7 @@ func (d *driver) Run(c *execdriver.Command, pipes *execdriver.Pipes, startCallba
 			c.ProcessConfig.Process.Kill()
 			c.ProcessConfig.Wait()
 		}
-		return -1, err
+		return execdriver.ExitStatus{-1, false}, err
 	}
 
 	c.ContainerPid = pid
@@ -192,7 +201,7 @@ func (d *driver) Run(c *execdriver.Command, pipes *execdriver.Pipes, startCallba
 
 	<-waitLock
 
-	return getExitCode(c), waitErr
+	return execdriver.ExitStatus{getExitCode(c), false}, waitErr
 }
 
 /// Return the exit code of the process
@@ -407,37 +416,24 @@ func rootIsShared() bool {
 }
 
 func (d *driver) generateLXCConfig(c *execdriver.Command) (string, error) {
-	var (
-		process, mount string
-		root           = path.Join(d.root, "containers", c.ID, "config.lxc")
-		labels         = c.Config["label"]
-	)
+	root := path.Join(d.root, "containers", c.ID, "config.lxc")
+
 	fo, err := os.Create(root)
 	if err != nil {
 		return "", err
 	}
 	defer fo.Close()
 
-	if len(labels) > 0 {
-		process, mount, err = label.GenLabels(labels[0])
-		if err != nil {
-			return "", err
-		}
-	}
-
 	if err := LxcTemplateCompiled.Execute(fo, struct {
 		*execdriver.Command
-		AppArmor     bool
-		ProcessLabel string
-		MountLabel   string
+		AppArmor bool
 	}{
-		Command:      c,
-		AppArmor:     d.apparmor,
-		ProcessLabel: process,
-		MountLabel:   mount,
+		Command:  c,
+		AppArmor: d.apparmor,
 	}); err != nil {
 		return "", err
 	}
+
 	return root, nil
 }
 
@@ -455,6 +451,11 @@ func (d *driver) generateEnvConfig(c *execdriver.Command) error {
 	})
 
 	return ioutil.WriteFile(p, data, 0600)
+}
+
+// Clean not implemented for lxc
+func (d *driver) Clean(id string) error {
+	return nil
 }
 
 type TtyConsole struct {
@@ -526,4 +527,8 @@ func (t *TtyConsole) AttachPipes(command *exec.Cmd, pipes *execdriver.Pipes) err
 func (t *TtyConsole) Close() error {
 	t.SlavePty.Close()
 	return t.MasterPty.Close()
+}
+
+func (d *driver) Exec(c *execdriver.Command, processConfig *execdriver.ProcessConfig, pipes *execdriver.Pipes, startCallback execdriver.StartCallback) (int, error) {
+	return -1, ErrExec
 }

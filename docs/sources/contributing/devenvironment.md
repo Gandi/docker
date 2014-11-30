@@ -63,7 +63,14 @@ To create the Docker binary, run this command:
 
     $ sudo make binary
 
-This will create the Docker binary in `./bundles/<version>-dev/binary/`
+This will create the Docker binary in `./bundles/<version>-dev/binary/`. If you
+do not see files in the `./bundles` directory in your host, your `BINDDIR`
+setting is not set quite right. You want to run the following command: 
+    
+    $ sudo make BINDDIR=. binary 
+
+If you are on a non-Linux platform, e.g., OSX, you'll want to run `make cross`
+or `make BINDDIR=. cross`.
 
 ### Using your built Docker binary
 
@@ -101,8 +108,6 @@ something like this
     --- PASS: TestParseRepositoryTag (0.00 seconds)
     === RUN TestGetResolvConf
     --- PASS: TestGetResolvConf (0.00 seconds)
-    === RUN TestCheckLocalDns
-    --- PASS: TestCheckLocalDns (0.00 seconds)
     === RUN TestParseRelease
     --- PASS: TestParseRelease (0.00 seconds)
     === RUN TestDependencyGraphCircular
@@ -115,7 +120,7 @@ something like this
 If $TESTFLAGS is set in the environment, it is passed as extra arguments
 to `go test`. You can use this to select certain tests to run, e.g.,
 
-    $ TESTFLAGS=`-run \^TestBuild\$` make test
+    $ TESTFLAGS='-test.run \^TestBuild\$' make test
 
 If the output indicates "FAIL" and you see errors like this:
 

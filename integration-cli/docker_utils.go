@@ -41,14 +41,14 @@ func NewDaemon(t *testing.T) *Daemon {
 		t.Fatal("Please set the DEST environment variable")
 	}
 
-	dir := filepath.Join(dest, fmt.Sprintf("daemon%d", time.Now().Unix()))
+	dir := filepath.Join(dest, fmt.Sprintf("daemon%d", time.Now().UnixNano()%100000000))
 	daemonFolder, err := filepath.Abs(dir)
 	if err != nil {
-		t.Fatal("Could not make '%s' an absolute path: %v", dir, err)
+		t.Fatalf("Could not make %q an absolute path: %v", dir, err)
 	}
 
 	if err := os.MkdirAll(filepath.Join(daemonFolder, "graph"), 0600); err != nil {
-		t.Fatal("Could not create %s/graph directory", daemonFolder)
+		t.Fatalf("Could not create %s/graph directory", daemonFolder)
 	}
 
 	return &Daemon{
@@ -60,7 +60,7 @@ func NewDaemon(t *testing.T) *Daemon {
 }
 
 // Start will start the daemon and return once it is ready to receive requests.
-// You can specify additional daemon flags (e.g. "--restart=false").
+// You can specify additional daemon flags.
 func (d *Daemon) Start(arg ...string) error {
 	dockerBinary, err := exec.LookPath(dockerBinary)
 	if err != nil {
@@ -69,16 +69,34 @@ func (d *Daemon) Start(arg ...string) error {
 
 	args := []string{
 		"--host", d.sock(),
-		"--daemon", "--debug",
+		"--daemon",
 		"--graph", fmt.Sprintf("%s/graph", d.folder),
-		"--storage-driver", d.storageDriver,
-		"--exec-driver", d.execDriver,
 		"--pidfile", fmt.Sprintf("%s/docker.pid", d.folder),
 	}
+
+	// If we don't explicitly set the log-level or debug flag(-D) then
+	// turn on debug mode
+	foundIt := false
+	for _, a := range arg {
+		if strings.Contains(a, "--log-level") || strings.Contains(a, "-D") {
+			foundIt = true
+		}
+	}
+	if !foundIt {
+		args = append(args, "--debug")
+	}
+
+	if d.storageDriver != "" {
+		args = append(args, "--storage-driver", d.storageDriver)
+	}
+	if d.execDriver != "" {
+		args = append(args, "--exec-driver", d.execDriver)
+	}
+
 	args = append(args, arg...)
 	d.cmd = exec.Command(dockerBinary, args...)
 
-	d.logFile, err = os.OpenFile(filepath.Join(d.folder, "docker.log"), os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0600)
+	d.logFile, err = os.OpenFile(filepath.Join(d.folder, "docker.log"), os.O_RDWR|os.O_CREATE|os.O_APPEND, 0600)
 	if err != nil {
 		d.t.Fatalf("Could not create %s/docker.log: %v", d.folder, err)
 	}
@@ -87,21 +105,28 @@ func (d *Daemon) Start(arg ...string) error {
 	d.cmd.Stderr = d.logFile
 
 	if err := d.cmd.Start(); err != nil {
-		return fmt.Errorf("Could not start daemon container: %v", err)
+		return fmt.Errorf("could not start daemon container: %v", err)
 	}
 
-	d.wait = make(chan error)
+	wait := make(chan error)
 
 	go func() {
-		d.wait <- d.cmd.Wait()
+		wait <- d.cmd.Wait()
 		d.t.Log("exiting daemon")
-		close(d.wait)
+		close(wait)
 	}()
+
+	d.wait = wait
 
 	tick := time.Tick(500 * time.Millisecond)
 	// make sure daemon is ready to receive requests
+	startTime := time.Now().Unix()
 	for {
 		d.t.Log("waiting for daemon to start")
+		if time.Now().Unix()-startTime > 5 {
+			// After 5 seconds, give up
+			return errors.New("Daemon exited and never started")
+		}
 		select {
 		case <-time.After(2 * time.Second):
 			return errors.New("timeout: daemon does not respond")
@@ -165,7 +190,7 @@ func (d *Daemon) StartWithBusybox(arg ...string) error {
 // instantiate a new one with NewDaemon.
 func (d *Daemon) Stop() error {
 	if d.cmd == nil || d.wait == nil {
-		return errors.New("Daemon not started")
+		return errors.New("daemon not started")
 	}
 
 	defer func() {
@@ -177,7 +202,7 @@ func (d *Daemon) Stop() error {
 	tick := time.Tick(time.Second)
 
 	if err := d.cmd.Process.Signal(os.Interrupt); err != nil {
-		return fmt.Errorf("Could not send signal: %v", err)
+		return fmt.Errorf("could not send signal: %v", err)
 	}
 out:
 	for {
@@ -190,7 +215,7 @@ out:
 		case <-tick:
 			d.t.Logf("Attempt #%d: daemon is still running with pid %d", i+1, d.cmd.Process.Pid)
 			if err := d.cmd.Process.Signal(os.Interrupt); err != nil {
-				return fmt.Errorf("Could not send signal: %v", err)
+				return fmt.Errorf("could not send signal: %v", err)
 			}
 			i++
 		}
@@ -224,6 +249,36 @@ func (d *Daemon) Cmd(name string, arg ...string) (string, error) {
 	return string(b), err
 }
 
+func sockRequest(method, endpoint string) ([]byte, error) {
+	// FIX: the path to sock should not be hardcoded
+	sock := filepath.Join("/", "var", "run", "docker.sock")
+	c, err := net.DialTimeout("unix", sock, time.Duration(10*time.Second))
+	if err != nil {
+		return nil, fmt.Errorf("could not dial docker sock at %s: %v", sock, err)
+	}
+
+	client := httputil.NewClientConn(c, nil)
+	defer client.Close()
+
+	req, err := http.NewRequest(method, endpoint, nil)
+	req.Header.Set("Content-Type", "application/json")
+	if err != nil {
+		return nil, fmt.Errorf("could not create new request: %v", err)
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("could not perform request: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := ioutil.ReadAll(resp.Body)
+		return body, fmt.Errorf("received status != 200 OK: %s", resp.Status)
+	}
+
+	return ioutil.ReadAll(resp.Body)
+}
+
 func deleteContainer(container string) error {
 	container = strings.Replace(container, "\n", " ", -1)
 	container = strings.Trim(container, " ")
@@ -231,7 +286,7 @@ func deleteContainer(container string) error {
 	killSplitArgs := strings.Split(killArgs, " ")
 	killCmd := exec.Command(dockerBinary, killSplitArgs...)
 	runCommand(killCmd)
-	rmArgs := fmt.Sprintf("rm %v", container)
+	rmArgs := fmt.Sprintf("rm -v %v", container)
 	rmSplitArgs := strings.Split(rmArgs, " ")
 	rmCmd := exec.Command(dockerBinary, rmSplitArgs...)
 	exitCode, err := runCommand(rmCmd)
@@ -266,8 +321,11 @@ func deleteAllContainers() error {
 	return nil
 }
 
-func deleteImages(images string) error {
-	rmiCmd := exec.Command(dockerBinary, "rmi", images)
+func deleteImages(images ...string) error {
+	args := make([]string, 1, 2)
+	args[0] = "rmi"
+	args = append(args, images...)
+	rmiCmd := exec.Command(dockerBinary, args...)
 	exitCode, err := runCommand(rmiCmd)
 	// set error manually if not set
 	if exitCode != 0 && err == nil {
@@ -281,7 +339,7 @@ func imageExists(image string) error {
 	inspectCmd := exec.Command(dockerBinary, "inspect", image)
 	exitCode, err := runCommand(inspectCmd)
 	if exitCode != 0 && err == nil {
-		err = fmt.Errorf("couldn't find image '%s'", image)
+		err = fmt.Errorf("couldn't find image %q", image)
 	}
 	return err
 }
@@ -292,20 +350,26 @@ func pullImageIfNotExist(image string) (err error) {
 		_, exitCode, err := runCommandWithOutput(pullCmd)
 
 		if err != nil || exitCode != 0 {
-			err = fmt.Errorf("image '%s' wasn't found locally and it couldn't be pulled: %s", image, err)
+			err = fmt.Errorf("image %q wasn't found locally and it couldn't be pulled: %s", image, err)
 		}
 	}
 	return
 }
 
-// deprecated, use dockerCmd instead
-func cmd(t *testing.T, args ...string) (string, int, error) {
-	return dockerCmd(t, args...)
-}
-
 func dockerCmd(t *testing.T, args ...string) (string, int, error) {
 	out, status, err := runCommandWithOutput(exec.Command(dockerBinary, args...))
-	errorOut(err, t, fmt.Sprintf("'%s' failed with errors: %v (%v)", strings.Join(args, " "), err, out))
+	if err != nil {
+		t.Fatalf("%q failed with errors: %s, %v", strings.Join(args, " "), out, err)
+	}
+	return out, status, err
+}
+
+// execute a docker ocmmand with a timeout
+func dockerCmdWithTimeout(timeout time.Duration, args ...string) (string, int, error) {
+	out, status, err := runCommandWithOutputAndTimeout(exec.Command(dockerBinary, args...), timeout)
+	if err != nil {
+		return out, status, fmt.Errorf("%q failed with errors: %v : %q)", strings.Join(args, " "), err, out)
+	}
 	return out, status, err
 }
 
@@ -314,11 +378,24 @@ func dockerCmdInDir(t *testing.T, path string, args ...string) (string, int, err
 	dockerCommand := exec.Command(dockerBinary, args...)
 	dockerCommand.Dir = path
 	out, status, err := runCommandWithOutput(dockerCommand)
-	errorOut(err, t, fmt.Sprintf("'%s' failed with errors: %v (%v)", strings.Join(args, " "), err, out))
+	if err != nil {
+		return out, status, fmt.Errorf("%q failed with errors: %v : %q)", strings.Join(args, " "), err, out)
+	}
 	return out, status, err
 }
 
-func findContainerIp(t *testing.T, id string) string {
+// execute a docker command in a directory with a timeout
+func dockerCmdInDirWithTimeout(timeout time.Duration, path string, args ...string) (string, int, error) {
+	dockerCommand := exec.Command(dockerBinary, args...)
+	dockerCommand.Dir = path
+	out, status, err := runCommandWithOutputAndTimeout(dockerCommand, timeout)
+	if err != nil {
+		return out, status, fmt.Errorf("%q failed with errors: %v : %q)", strings.Join(args, " "), err, out)
+	}
+	return out, status, err
+}
+
+func findContainerIP(t *testing.T, id string) string {
 	cmd := exec.Command(dockerBinary, "inspect", "--format='{{ .NetworkSettings.IPAddress }}'", id)
 	out, _, err := runCommandWithOutput(cmd)
 	if err != nil {
@@ -380,6 +457,9 @@ func (f *FakeContext) Close() error {
 func fakeContext(dockerfile string, files map[string]string) (*FakeContext, error) {
 	tmp, err := ioutil.TempDir("", "fake-context")
 	if err != nil {
+		return nil, err
+	}
+	if err := os.Chmod(tmp, 0755); err != nil {
 		return nil, err
 	}
 	ctx := &FakeContext{tmp}
@@ -446,8 +526,48 @@ func inspectFieldJSON(name, field string) (string, error) {
 	return strings.TrimSpace(out), nil
 }
 
+func inspectFieldMap(name, path, field string) (string, error) {
+	format := fmt.Sprintf("{{index .%s %q}}", path, field)
+	inspectCmd := exec.Command(dockerBinary, "inspect", "-f", format, name)
+	out, exitCode, err := runCommandWithOutput(inspectCmd)
+	if err != nil || exitCode != 0 {
+		return "", fmt.Errorf("failed to inspect %s: %s", name, out)
+	}
+	return strings.TrimSpace(out), nil
+}
+
 func getIDByName(name string) (string, error) {
 	return inspectField(name, "Id")
+}
+
+// getContainerState returns the exit code of the container
+// and true if it's running
+// the exit code should be ignored if it's running
+func getContainerState(t *testing.T, id string) (int, bool, error) {
+	var (
+		exitStatus int
+		running    bool
+	)
+	out, exitCode, err := dockerCmd(t, "inspect", "--format={{.State.Running}} {{.State.ExitCode}}", id)
+	if err != nil || exitCode != 0 {
+		return 0, false, fmt.Errorf("%q doesn't exist: %s", id, err)
+	}
+
+	out = strings.Trim(out, "\n")
+	splitOutput := strings.Split(out, " ")
+	if len(splitOutput) != 2 {
+		return 0, false, fmt.Errorf("failed to get container state: output is broken")
+	}
+	if splitOutput[0] == "true" {
+		running = true
+	}
+	if n, err := strconv.Atoi(splitOutput[1]); err == nil {
+		exitStatus = n
+	} else {
+		return 0, false, fmt.Errorf("failed to get container state: couldn't parse integer")
+	}
+
+	return exitStatus, running, nil
 }
 
 func buildImageWithOut(name, dockerfile string, useCache bool) (string, string, error) {
@@ -534,17 +654,17 @@ func fakeGIT(name string, files map[string]string) (*FakeGIT, error) {
 	defer os.Chdir(curdir)
 
 	if output, err := exec.Command("git", "init", ctx.Dir).CombinedOutput(); err != nil {
-		return nil, fmt.Errorf("Error trying to init repo: %s (%s)", err, output)
+		return nil, fmt.Errorf("error trying to init repo: %s (%s)", err, output)
 	}
 	err = os.Chdir(ctx.Dir)
 	if err != nil {
 		return nil, err
 	}
 	if output, err := exec.Command("git", "add", "*").CombinedOutput(); err != nil {
-		return nil, fmt.Errorf("Error trying to add files to repo: %s (%s)", err, output)
+		return nil, fmt.Errorf("error trying to add files to repo: %s (%s)", err, output)
 	}
 	if output, err := exec.Command("git", "commit", "-a", "-m", "Initial commit").CombinedOutput(); err != nil {
-		return nil, fmt.Errorf("Error trying to commit to repo: %s (%s)", err, output)
+		return nil, fmt.Errorf("error trying to commit to repo: %s (%s)", err, output)
 	}
 
 	root, err := ioutil.TempDir("", "docker-test-git-repo")
@@ -554,7 +674,7 @@ func fakeGIT(name string, files map[string]string) (*FakeGIT, error) {
 	repoPath := filepath.Join(root, name+".git")
 	if output, err := exec.Command("git", "clone", "--bare", ctx.Dir, repoPath).CombinedOutput(); err != nil {
 		os.RemoveAll(root)
-		return nil, fmt.Errorf("Error trying to clone --bare: %s (%s)", err, output)
+		return nil, fmt.Errorf("error trying to clone --bare: %s (%s)", err, output)
 	}
 	err = os.Chdir(repoPath)
 	if err != nil {
@@ -563,7 +683,7 @@ func fakeGIT(name string, files map[string]string) (*FakeGIT, error) {
 	}
 	if output, err := exec.Command("git", "update-server-info").CombinedOutput(); err != nil {
 		os.RemoveAll(root)
-		return nil, fmt.Errorf("Error trying to git update-server-info: %s (%s)", err, output)
+		return nil, fmt.Errorf("error trying to git update-server-info: %s (%s)", err, output)
 	}
 	err = os.Chdir(curdir)
 	if err != nil {
@@ -610,4 +730,37 @@ func readFile(src string, t *testing.T) (content string) {
 		t.Fatal(err)
 	}
 	return string(data)
+}
+
+func containerStorageFile(containerId, basename string) string {
+	return filepath.Join("/var/lib/docker/containers", containerId, basename)
+}
+
+// docker commands that use this function must be run with the '-d' switch.
+func runCommandAndReadContainerFile(filename string, cmd *exec.Cmd) ([]byte, error) {
+	out, _, err := runCommandWithOutput(cmd)
+	if err != nil {
+		return nil, fmt.Errorf("%v: %q", err, out)
+	}
+
+	time.Sleep(1 * time.Second)
+
+	contID := strings.TrimSpace(out)
+
+	return readContainerFile(contID, filename)
+}
+
+func readContainerFile(containerId, filename string) ([]byte, error) {
+	f, err := os.Open(containerStorageFile(containerId, filename))
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	content, err := ioutil.ReadAll(f)
+	if err != nil {
+		return nil, err
+	}
+
+	return content, nil
 }

@@ -14,7 +14,7 @@ import (
 
 const (
 	PortSpecTemplate       = "ip:hostPort:containerPort"
-	PortSpecTemplateFormat = "ip:hostPort:containerPort | ip::containerPort | hostPort:containerPort"
+	PortSpecTemplateFormat = "ip:hostPort:containerPort | ip::containerPort | hostPort:containerPort | containerPort"
 )
 
 type PortBinding struct {
@@ -42,38 +42,35 @@ func ParsePort(rawPort string) (int, error) {
 }
 
 func (p Port) Proto() string {
-	parts := strings.Split(string(p), "/")
-	if len(parts) == 1 {
-		return "tcp"
-	}
-	return parts[1]
+	proto, _ := SplitProtoPort(string(p))
+	return proto
 }
 
 func (p Port) Port() string {
-	return strings.Split(string(p), "/")[0]
+	_, port := SplitProtoPort(string(p))
+	return port
 }
 
 func (p Port) Int() int {
-	i, err := ParsePort(p.Port())
+	port, err := ParsePort(p.Port())
 	if err != nil {
 		panic(err)
 	}
-	return i
+	return port
 }
 
-// Splits a port in the format of port/proto
+// Splits a port in the format of proto/port
 func SplitProtoPort(rawPort string) (string, string) {
 	parts := strings.Split(rawPort, "/")
 	l := len(parts)
-	if l == 0 {
+	if len(rawPort) == 0 || l == 0 || len(parts[0]) == 0 {
 		return "", ""
 	}
 	if l == 1 {
-		if rawPort == "" {
-			return "", "" // ""/tcp is not valid, ever
-		}
-
 		return "tcp", rawPort
+	}
+	if len(parts[1]) == 0 {
+		return "tcp", parts[0]
 	}
 	return parts[1], parts[0]
 }

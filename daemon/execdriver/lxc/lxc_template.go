@@ -1,11 +1,11 @@
 package lxc
 
 import (
-	"strings"
-	"text/template"
-
 	"github.com/docker/docker/daemon/execdriver"
 	"github.com/docker/libcontainer/label"
+	"os"
+	"strings"
+	"text/template"
 )
 
 const LxcTemplate = `
@@ -34,10 +34,6 @@ lxc.pts = 1024
 
 # disable the main console
 lxc.console = none
-{{if .ProcessLabel}}
-lxc.se_context = {{ .ProcessLabel}}
-{{end}}
-{{$MOUNTLABEL := .MountLabel}}
 
 # no controlling tty at all
 lxc.tty = 1
@@ -67,17 +63,18 @@ lxc.mount.entry = proc {{escapeFstabSpaces $ROOTFS}}/proc proc nosuid,nodev,noex
 lxc.mount.entry = sysfs {{escapeFstabSpaces $ROOTFS}}/sys sysfs nosuid,nodev,noexec 0 0
 
 {{if .ProcessConfig.Tty}}
-lxc.mount.entry = {{.Console}} {{escapeFstabSpaces $ROOTFS}}/dev/console none bind,rw 0 0
+lxc.mount.entry = {{.ProcessConfig.Console}} {{escapeFstabSpaces $ROOTFS}}/dev/console none bind,rw 0 0
 {{end}}
 
-lxc.mount.entry = devpts {{escapeFstabSpaces $ROOTFS}}/dev/pts devpts {{formatMountLabel "newinstance,ptmxmode=0666,nosuid,noexec" $MOUNTLABEL}} 0 0
-lxc.mount.entry = shm {{escapeFstabSpaces $ROOTFS}}/dev/shm tmpfs {{formatMountLabel "size=65536k,nosuid,nodev,noexec" $MOUNTLABEL}} 0 0
+lxc.mount.entry = devpts {{escapeFstabSpaces $ROOTFS}}/dev/pts devpts {{formatMountLabel "newinstance,ptmxmode=0666,nosuid,noexec" ""}} 0 0
+lxc.mount.entry = shm {{escapeFstabSpaces $ROOTFS}}/dev/shm tmpfs {{formatMountLabel "size=65536k,nosuid,nodev,noexec" ""}} 0 0
 
 {{range $value := .Mounts}}
+{{$createVal := isDirectory $value.Source}}
 {{if $value.Writable}}
-lxc.mount.entry = {{$value.Source}} {{escapeFstabSpaces $ROOTFS}}/{{escapeFstabSpaces $value.Destination}} none rbind,rw 0 0
+lxc.mount.entry = {{$value.Source}} {{escapeFstabSpaces $ROOTFS}}/{{escapeFstabSpaces $value.Destination}} none rbind,rw,create={{$createVal}} 0 0
 {{else}}
-lxc.mount.entry = {{$value.Source}} {{escapeFstabSpaces $ROOTFS}}/{{escapeFstabSpaces $value.Destination}} none rbind,ro 0 0
+lxc.mount.entry = {{$value.Source}} {{escapeFstabSpaces $ROOTFS}}/{{escapeFstabSpaces $value.Destination}} none rbind,ro,create={{$createVal}} 0 0
 {{end}}
 {{end}}
 
@@ -106,8 +103,8 @@ lxc.cgroup.cpuset.cpus = {{.Resources.Cpuset}}
 {{end}}
 {{end}}
 
-{{if .Config.lxc}}
-{{range $value := .Config.lxc}}
+{{if .LxcConfig}}
+{{range $value := .LxcConfig}}
 lxc.{{$value}}
 {{end}}
 {{end}}
@@ -119,6 +116,20 @@ var LxcTemplateCompiled *template.Template
 // format for "lxc.mount.entry" lines in lxc.conf. See also "man 5 fstab".
 func escapeFstabSpaces(field string) string {
 	return strings.Replace(field, " ", "\\040", -1)
+}
+
+func isDirectory(source string) string {
+	f, err := os.Stat(source)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "dir"
+		}
+		return ""
+	}
+	if f.IsDir() {
+		return "dir"
+	}
+	return "file"
 }
 
 func getMemorySwap(v *execdriver.Resources) int64 {
@@ -147,6 +158,7 @@ func init() {
 		"getMemorySwap":     getMemorySwap,
 		"escapeFstabSpaces": escapeFstabSpaces,
 		"formatMountLabel":  label.FormatMountLabel,
+		"isDirectory":       isDirectory,
 	}
 	LxcTemplateCompiled, err = template.New("lxc").Funcs(funcMap).Parse(LxcTemplate)
 	if err != nil {

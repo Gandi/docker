@@ -9,7 +9,6 @@ import (
 	"path/filepath"
 
 	"github.com/docker/docker/daemon/execdriver"
-	"github.com/docker/docker/daemon/execdriver/native/configuration"
 	"github.com/docker/docker/daemon/execdriver/native/template"
 	"github.com/docker/libcontainer"
 	"github.com/docker/libcontainer/apparmor"
@@ -31,10 +30,15 @@ func (d *driver) createContainer(c *execdriver.Command) (*libcontainer.Config, e
 	container.Cgroups.Name = c.ID
 	container.Cgroups.AllowedDevices = c.AllowedDevices
 	container.MountConfig.DeviceNodes = c.AutoCreatedDevices
+	container.RootFs = c.Rootfs
 
 	// check to see if we are running in ramdisk to disable pivot root
 	container.MountConfig.NoPivotRoot = os.Getenv("DOCKER_RAMDISK") != ""
 	container.RestrictSys = true
+
+	if err := d.createIpc(container, c); err != nil {
+		return nil, err
+	}
 
 	if err := d.createNetwork(container, c); err != nil {
 		return nil, err
@@ -48,6 +52,10 @@ func (d *driver) createContainer(c *execdriver.Command) (*libcontainer.Config, e
 		if err := d.setCapabilities(container, c); err != nil {
 			return nil, err
 		}
+	}
+
+	if c.AppArmorProfile != "" {
+		container.AppArmorProfile = c.AppArmorProfile
 	}
 
 	if err := d.setupCgroups(container, c); err != nil {
@@ -68,10 +76,6 @@ func (d *driver) createContainer(c *execdriver.Command) (*libcontainer.Config, e
 		cmds[k] = v.cmd
 	}
 	d.Unlock()
-
-	if err := configuration.ParseConfiguration(container, cmds, c.Config["native"]); err != nil {
-		return nil, err
-	}
 
 	return container, nil
 }
@@ -95,6 +99,7 @@ func (d *driver) createNetwork(container *libcontainer.Config, c *execdriver.Com
 		vethNetwork := libcontainer.Network{
 			Mtu:        c.Network.Mtu,
 			Address:    fmt.Sprintf("%s/%d", c.Network.Interface.IPAddress, c.Network.Interface.IPPrefixLen),
+			MacAddress: c.Network.Interface.MacAddress,
 			Gateway:    c.Network.Interface.Gateway,
 			Type:       "veth",
 			Bridge:     c.Network.Interface.Bridge,
@@ -118,6 +123,28 @@ func (d *driver) createNetwork(container *libcontainer.Config, c *execdriver.Com
 			Type:   "netns",
 			NsPath: nspath,
 		})
+	}
+
+	return nil
+}
+
+func (d *driver) createIpc(container *libcontainer.Config, c *execdriver.Command) error {
+	if c.Ipc.HostIpc {
+		container.Namespaces["NEWIPC"] = false
+		return nil
+	}
+
+	if c.Ipc.ContainerID != "" {
+		d.Lock()
+		active := d.activeContainers[c.Ipc.ContainerID]
+		d.Unlock()
+
+		if active == nil || active.cmd.Process == nil {
+			return fmt.Errorf("%s is not a valid running container to join", c.Ipc.ContainerID)
+		}
+		cmd := active.cmd
+
+		container.IpcNsPath = filepath.Join("/proc", fmt.Sprint(cmd.Process.Pid), "ns", "ipc")
 	}
 
 	return nil
@@ -167,6 +194,7 @@ func (d *driver) setupMounts(container *libcontainer.Config, c *execdriver.Comma
 			Destination: m.Destination,
 			Writable:    m.Writable,
 			Private:     m.Private,
+			Slave:       m.Slave,
 		})
 	}
 
@@ -174,8 +202,8 @@ func (d *driver) setupMounts(container *libcontainer.Config, c *execdriver.Comma
 }
 
 func (d *driver) setupLabels(container *libcontainer.Config, c *execdriver.Command) error {
-	container.ProcessLabel = c.Config["process_label"][0]
-	container.MountConfig.MountLabel = c.Config["mount_label"][0]
+	container.ProcessLabel = c.ProcessLabel
+	container.MountConfig.MountLabel = c.MountLabel
 
 	return nil
 }

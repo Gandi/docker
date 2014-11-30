@@ -21,30 +21,30 @@ grasp the context, here are some examples of registries:
 
  - **sponsor registry**: such a registry is provided by a third-party
    hosting infrastructure as a convenience for their customers and the
-   docker community as a whole. Its costs are supported by the third
+   Docker community as a whole. Its costs are supported by the third
    party, but the management and operation of the registry are
-   supported by dotCloud. It features read/write access, and delegates
+   supported by Docker. It features read/write access, and delegates
    authentication and authorization to the Index.
  - **mirror registry**: such a registry is provided by a third-party
    hosting infrastructure but is targeted at their customers only. Some
    mechanism (unspecified to date) ensures that public images are
    pulled from a sponsor registry to the mirror registry, to make sure
-   that the customers of the third-party provider can “docker pull”
+   that the customers of the third-party provider can `docker pull`
    those images locally.
  - **vendor registry**: such a registry is provided by a software
-   vendor, who wants to distribute docker images. It would be operated
+   vendor, who wants to distribute Docker images. It would be operated
    and managed by the vendor. Only users authorized by the vendor would
    be able to get write access. Some images would be public (accessible
    for anyone), others private (accessible only for authorized users).
    Authentication and authorization would be delegated to the Index.
-   The goal of vendor registries is to let someone do “docker pull
-   basho/riak1.3” and automatically push from the vendor registry
-   (instead of a sponsor registry); i.e. get all the convenience of a
+   The goal of vendor registries is to let someone do `docker pull
+   basho/riak1.3` and automatically push from the vendor registry
+   (instead of a sponsor registry); i.e., get all the convenience of a
    sponsor registry, while retaining control on the asset distribution.
  - **private registry**: such a registry is located behind a firewall,
    or protected by an additional security layer (HTTP authorization,
    SSL client-side certificates, IP address authorization...). The
-   registry is operated by a private entity, outside of dotCloud's
+   registry is operated by a private entity, outside of Docker's
    control. It can optionally delegate additional authorization to the
    Index, but it is not mandatory.
 
@@ -52,7 +52,7 @@ grasp the context, here are some examples of registries:
 > Mirror registries and private registries which do not use the Index
 > don't even need to run the registry code. They can be implemented by any
 > kind of transport implementing HTTP GET and PUT. Read-only registries
-> can be powered by a simple static HTTP server.
+> can be powered by a simple static HTTPS server.
 
 > **Note**:
 > The latter implies that while HTTP is the protocol of choice for a registry,
@@ -60,12 +60,19 @@ grasp the context, here are some examples of registries:
 >
 >  - HTTP with GET (and PUT for read-write registries);
 >  - local mount point;
->  - remote docker addressed through SSH.
+>  - remote Docker addressed through SSH.
 
-The latter would only require two new commands in docker, e.g.,
+The latter would only require two new commands in Docker, e.g.,
 `registryget` and `registryput`, wrapping access to the local filesystem
 (and optionally doing consistency checks). Authentication and authorization
 are then delegated to SSH (e.g., with public keys).
+
+> **Note**:
+> Private registry servers that expose an HTTP endpoint need to be secured with
+> TLS (preferably TLSv1.2, but at least TLSv1.0). Make sure to put the CA
+> certificate at /etc/docker/certs.d/my.registry.com:5000/ca.crt on the Docker
+> host, so that the daemon can securely access the private registry.
+> Support for SSLv3 and lower is not available due to security issues.
 
 The default namespace for a private repository is `library`.
 
@@ -73,13 +80,13 @@ The default namespace for a private repository is `library`.
 
 ## Images
 
-### Layer
+### Get image layer
 
 `GET /v1/images/(image_id)/layer`
 
 Get image layer for a given `image_id`
 
-    **Example Request**:
+**Example Request**:
 
         GET /v1/images/088b4505aa3adc3d35e79c031fa126b403200f02f51920fbd9b7c503e87c7a2c/layer HTTP/1.1
         Host: registry-1.docker.io
@@ -87,11 +94,11 @@ Get image layer for a given `image_id`
         Content-Type: application/json
         Authorization: Token signature=123abc,repository="foo/bar",access=read
 
-    Parameters:
+Parameters:
 
-    - **image_id** – the id for the layer you want to get
+- **image_id** – the id for the layer you want to get
 
-    **Example Response**:
+**Example Response**:
 
         HTTP/1.1 200
         Vary: Accept
@@ -100,17 +107,19 @@ Get image layer for a given `image_id`
 
         {layer binary data stream}
 
-    Status Codes:
+Status Codes:
 
-    - **200** – OK
-    - **401** – Requires authorization
-    - **404** – Image not found
+- **200** – OK
+- **401** – Requires authorization
+- **404** – Image not found
+
+### Put image layer
 
 `PUT /v1/images/(image_id)/layer`
 
 Put image layer for a given `image_id`
 
-    **Example Request**:
+**Example Request**:
 
         PUT /v1/images/088b4505aa3adc3d35e79c031fa126b403200f02f51920fbd9b7c503e87c7a2c/layer HTTP/1.1
         Host: registry-1.docker.io
@@ -119,11 +128,11 @@ Put image layer for a given `image_id`
 
         {layer binary data stream}
 
-    Parameters:
+Parameters:
 
-    - **image_id** – the id for the layer you want to get
+- **image_id** – the id for the layer you want to get
 
-    **Example Response**:
+**Example Response**:
 
         HTTP/1.1 200
         Vary: Accept
@@ -132,19 +141,21 @@ Put image layer for a given `image_id`
 
         ""
 
-    Status Codes:
+Status Codes:
 
-    - **200** – OK
-    - **401** – Requires authorization
-    - **404** – Image not found
+- **200** – OK
+- **401** – Requires authorization
+- **404** – Image not found
 
 ## Image
+
+### Put image layer
 
 `PUT /v1/images/(image_id)/json`
 
 Put image for a given `image_id`
 
-    **Example Request**:
+**Example Request**:
 
         PUT /v1/images/088b4505aa3adc3d35e79c031fa126b403200f02f51920fbd9b7c503e87c7a2c/json HTTP/1.1
         Host: registry-1.docker.io
@@ -183,11 +194,11 @@ Put image for a given `image_id`
             docker_version: "0.1.7"
         }
 
-    Parameters:
+Parameters:
 
-    - **image_id** – the id for the layer you want to get
+- **image_id** – the id for the layer you want to get
 
-    **Example Response**:
+**Example Response**:
 
         HTTP/1.1 200
         Vary: Accept
@@ -196,16 +207,18 @@ Put image for a given `image_id`
 
         ""
 
-    Status Codes:
+Status Codes:
 
-    - **200** – OK
-    - **401** – Requires authorization
+- **200** – OK
+- **401** – Requires authorization
+
+### Get image layer
 
 `GET /v1/images/(image_id)/json`
 
 Get image for a given `image_id`
 
-    **Example Request**:
+**Example Request**:
 
         GET /v1/images/088b4505aa3adc3d35e79c031fa126b403200f02f51920fbd9b7c503e87c7a2c/json HTTP/1.1
         Host: registry-1.docker.io
@@ -213,11 +226,11 @@ Get image for a given `image_id`
         Content-Type: application/json
         Cookie: (Cookie provided by the Registry)
 
-    Parameters:
+Parameters:
 
-    - **image_id** – the id for the layer you want to get
+- **image_id** – the id for the layer you want to get
 
-    **Example Response**:
+**Example Response**:
 
         HTTP/1.1 200
         Vary: Accept
@@ -257,19 +270,21 @@ Get image for a given `image_id`
             docker_version: "0.1.7"
         }
 
-    Status Codes:
+Status Codes:
 
-    - **200** – OK
-    - **401** – Requires authorization
-    - **404** – Image not found
+- **200** – OK
+- **401** – Requires authorization
+- **404** – Image not found
 
 ## Ancestry
+
+### Get image ancestry
 
 `GET /v1/images/(image_id)/ancestry`
 
 Get ancestry for an image given an `image_id`
 
-    **Example Request**:
+**Example Request**:
 
         GET /v1/images/088b4505aa3adc3d35e79c031fa126b403200f02f51920fbd9b7c503e87c7a2c/ancestry HTTP/1.1
         Host: registry-1.docker.io
@@ -277,11 +292,11 @@ Get ancestry for an image given an `image_id`
         Content-Type: application/json
         Cookie: (Cookie provided by the Registry)
 
-    Parameters:
+Parameters:
 
-    - **image_id** – the id for the layer you want to get
+- **image_id** – the id for the layer you want to get
 
-    **Example Response**:
+**Example Response**:
 
         HTTP/1.1 200
         Vary: Accept
@@ -293,19 +308,21 @@ Get ancestry for an image given an `image_id`
          "bfa4c5326bc764280b0863b46a4b20d940bc1897ef9c1dfec060604bdc383280",
          "6ab5893c6927c15a15665191f2c6cf751f5056d8b95ceee32e43c5e8a3648544"]
 
-    Status Codes:
+Status Codes:
 
-    - **200** – OK
-    - **401** – Requires authorization
-    - **404** – Image not found
+- **200** – OK
+- **401** – Requires authorization
+- **404** – Image not found
 
 ## Tags
+
+### List repository tags
 
 `GET /v1/repositories/(namespace)/(repository)/tags`
 
 Get all of the tags for the given repo.
 
-    **Example Request**:
+**Example Request**:
 
         GET /v1/repositories/reynholm/help-system-server/tags HTTP/1.1
         Host: registry-1.docker.io
@@ -314,12 +331,12 @@ Get all of the tags for the given repo.
         X-Docker-Registry-Version: 0.6.0
         Cookie: (Cookie provided by the Registry)
 
-    Parameters:
+Parameters:
 
-    - **namespace** – namespace for the repo
-    - **repository** – name for the repo
+- **namespace** – namespace for the repo
+- **repository** – name for the repo
 
-    **Example Response**:
+**Example Response**:
 
         HTTP/1.1 200
         Vary: Accept
@@ -331,17 +348,19 @@ Get all of the tags for the given repo.
             "0.1.1":  "b486531f9a779a0c17e3ed29dae8f12c4f9e89cc6f0bc3c38722009fe6857087"
         }
 
-    Status Codes:
+Status Codes:
 
-    - **200** – OK
-    - **401** – Requires authorization
-    - **404** – Repository not found
+- **200** – OK
+- **401** – Requires authorization
+- **404** – Repository not found
+
+### Get image id for a particular tag
 
 `GET /v1/repositories/(namespace)/(repository)/tags/(tag*)`
 
 Get a tag for the given repo.
 
-    **Example Request**:
+**Example Request**:
 
         GET /v1/repositories/reynholm/help-system-server/tags/latest HTTP/1.1
         Host: registry-1.docker.io
@@ -350,13 +369,13 @@ Get a tag for the given repo.
         X-Docker-Registry-Version: 0.6.0
         Cookie: (Cookie provided by the Registry)
 
-    Parameters:
+Parameters:
 
-    - **namespace** – namespace for the repo
-    - **repository** – name for the repo
-    - **tag** – name of tag you want to get
+- **namespace** – namespace for the repo
+- **repository** – name for the repo
+- **tag** – name of tag you want to get
 
-    **Example Response**:
+**Example Response**:
 
         HTTP/1.1 200
         Vary: Accept
@@ -365,17 +384,19 @@ Get a tag for the given repo.
 
         "9e89cc6f0bc3c38722009fe6857087b486531f9a779a0c17e3ed29dae8f12c4f"
 
-    Status Codes:
+Status Codes:
 
-    - **200** – OK
-    - **401** – Requires authorization
-    - **404** – Tag not found
+- **200** – OK
+- **401** – Requires authorization
+- **404** – Tag not found
+
+### Delete a repository tag
 
 `DELETE /v1/repositories/(namespace)/(repository)/tags/(tag*)`
 
 Delete the tag for the repo
 
-    **Example Request**:
+**Example Request**:
 
         DELETE /v1/repositories/reynholm/help-system-server/tags/latest HTTP/1.1
         Host: registry-1.docker.io
@@ -383,13 +404,13 @@ Delete the tag for the repo
         Content-Type: application/json
         Cookie: (Cookie provided by the Registry)
 
-    Parameters:
+Parameters:
 
-    - **namespace** – namespace for the repo
-    - **repository** – name for the repo
-    - **tag** – name of tag you want to delete
+- **namespace** – namespace for the repo
+- **repository** – name for the repo
+- **tag** – name of tag you want to delete
 
-    **Example Response**:
+**Example Response**:
 
         HTTP/1.1 200
         Vary: Accept
@@ -398,17 +419,19 @@ Delete the tag for the repo
 
         ""
 
-    Status Codes:
+Status Codes:
 
-    - **200** – OK
-    - **401** – Requires authorization
-    - **404** – Tag not found
+- **200** – OK
+- **401** – Requires authorization
+- **404** – Tag not found
+
+### Set a tag for a specified image id
 
 `PUT /v1/repositories/(namespace)/(repository)/tags/(tag*)`
 
 Put a tag for the given repo.
 
-    **Example Request**:
+**Example Request**:
 
         PUT /v1/repositories/reynholm/help-system-server/tags/latest HTTP/1.1
         Host: registry-1.docker.io
@@ -418,13 +441,13 @@ Put a tag for the given repo.
 
         "9e89cc6f0bc3c38722009fe6857087b486531f9a779a0c17e3ed29dae8f12c4f"
 
-    Parameters:
+Parameters:
 
-    - **namespace** – namespace for the repo
-    - **repository** – name for the repo
-    - **tag** – name of tag you want to add
+- **namespace** – namespace for the repo
+- **repository** – name for the repo
+- **tag** – name of tag you want to add
 
-    **Example Response**:
+**Example Response**:
 
         HTTP/1.1 200
         Vary: Accept
@@ -433,20 +456,22 @@ Put a tag for the given repo.
 
         ""
 
-    Status Codes:
+Status Codes:
 
-    - **200** – OK
-    - **400** – Invalid data
-    - **401** – Requires authorization
-    - **404** – Image not found
+- **200** – OK
+- **400** – Invalid data
+- **401** – Requires authorization
+- **404** – Image not found
 
 ## Repositories
+
+### Delete a repository
 
 `DELETE /v1/repositories/(namespace)/(repository)/`
 
 Delete a repository
 
-    **Example Request**:
+**Example Request**:
 
         DELETE /v1/repositories/reynholm/help-system-server/ HTTP/1.1
         Host: registry-1.docker.io
@@ -456,12 +481,12 @@ Delete a repository
 
         ""
 
-    Parameters:
+Parameters:
 
-    - **namespace** – namespace for the repo
-    - **repository** – name for the repo
+- **namespace** – namespace for the repo
+- **repository** – name for the repo
 
-    **Example Response**:
+**Example Response**:
 
         HTTP/1.1 200
         Vary: Accept
@@ -470,20 +495,63 @@ Delete a repository
 
         ""
 
-    Status Codes:
+Status Codes:
 
-    - **200** – OK
-    - **401** – Requires authorization
-    - **404** – Repository not found
+- **200** – OK
+- **401** – Requires authorization
+- **404** – Repository not found
+
+## Search
+
+If you need to search the index, this is the endpoint you would use.
+
+`GET /v1/search`
+
+Search the Index given a search term. It accepts
+
+    [GET](http://www.w3.org/Protocols/rfc2616/rfc2616-sec9.html#sec9.3)
+    only.
+
+**Example request**:
+
+        GET /v1/search?q=search_term HTTP/1.1
+        Host: index.docker.io
+        Accept: application/json
+
+**Example response**:
+
+        HTTP/1.1 200 OK
+        Vary: Accept
+        Content-Type: application/json
+
+        {"query":"search_term",
+          "num_results": 3,
+          "results" : [
+             {"name": "ubuntu", "description": "An ubuntu image..."},
+             {"name": "centos", "description": "A centos image..."},
+             {"name": "fedora", "description": "A fedora image..."}
+           ]
+         }
+
+Query Parameters:
+
+- **q** – what you want to search for
+
+Status Codes:
+
+- **200** – no error
+- **500** – server error
 
 ## Status
+
+### Status check for registry
 
 `GET /v1/_ping`
 
 Check status of the registry. This endpoint is also used to
 determine if the registry supports SSL.
 
-    **Example Request**:
+**Example Request**:
 
         GET /v1/_ping HTTP/1.1
         Host: registry-1.docker.io
@@ -492,7 +560,7 @@ determine if the registry supports SSL.
 
         ""
 
-    **Example Response**:
+**Example Response**:
 
         HTTP/1.1 200
         Vary: Accept
@@ -501,13 +569,12 @@ determine if the registry supports SSL.
 
         ""
 
-    Status Codes:
+Status Codes:
 
-    - **200** – OK
+- **200** – OK
 
 ## Authorization
 
 This is where we describe the authorization process, including the
 tokens and cookies.
 
-TODO: add more info.

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"io/ioutil"
+	"net/http"
 	"net/url"
 	"os"
 	"path"
@@ -18,14 +19,17 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/docker/docker/archive"
+	log "github.com/Sirupsen/logrus"
+	"github.com/docker/docker/builder/parser"
 	"github.com/docker/docker/daemon"
 	imagepkg "github.com/docker/docker/image"
-	"github.com/docker/docker/pkg/log"
+	"github.com/docker/docker/pkg/archive"
+	"github.com/docker/docker/pkg/chrootarchive"
 	"github.com/docker/docker/pkg/parsers"
 	"github.com/docker/docker/pkg/symlink"
 	"github.com/docker/docker/pkg/system"
 	"github.com/docker/docker/pkg/tarsum"
+	"github.com/docker/docker/pkg/urlutil"
 	"github.com/docker/docker/registry"
 	"github.com/docker/docker/utils"
 )
@@ -41,8 +45,11 @@ func (b *Builder) readContext(context io.Reader) error {
 		return err
 	}
 
-	b.context = &tarsum.TarSum{Reader: decompressedStream, DisableCompression: true}
-	if err := archive.Untar(b.context, tmpdirPath, nil); err != nil {
+	if b.context, err = tarsum.NewTarSum(decompressedStream, true, tarsum.Version0); err != nil {
+		return err
+	}
+
+	if err := chrootarchive.Untar(b.context, tmpdirPath, nil); err != nil {
 		return err
 	}
 
@@ -68,15 +75,10 @@ func (b *Builder) commit(id string, autoCmd []string, comment string) error {
 			return nil
 		}
 
-		container, warnings, err := b.Daemon.Create(b.Config, "")
+		container, err := b.create()
 		if err != nil {
 			return err
 		}
-		for _, warning := range warnings {
-			fmt.Fprintf(b.OutStream, " ---> [Warning] %s\n", warning)
-		}
-		b.TmpContainers[container.ID] = struct{}{}
-		fmt.Fprintf(b.OutStream, " ---> Running in %s\n", utils.TruncateID(container.ID))
 		id = container.ID
 
 		if err := container.Mount(); err != nil {
@@ -92,6 +94,7 @@ func (b *Builder) commit(id string, autoCmd []string, comment string) error {
 	// Note: Actually copy the struct
 	autoConfig := *b.Config
 	autoConfig.Cmd = autoCmd
+
 	// Commit the container
 	image, err := b.Daemon.Commit(container, "", "", "", b.maintainer, true, &autoConfig)
 	if err != nil {
@@ -101,37 +104,134 @@ func (b *Builder) commit(id string, autoCmd []string, comment string) error {
 	return nil
 }
 
+type copyInfo struct {
+	origPath   string
+	destPath   string
+	hash       string
+	decompress bool
+	tmpDir     string
+}
+
 func (b *Builder) runContextCommand(args []string, allowRemote bool, allowDecompression bool, cmdName string) error {
 	if b.context == nil {
 		return fmt.Errorf("No context given. Impossible to use %s", cmdName)
 	}
 
-	if len(args) != 2 {
-		return fmt.Errorf("Invalid %s format", cmdName)
+	if len(args) < 2 {
+		return fmt.Errorf("Invalid %s format - at least two arguments required", cmdName)
 	}
 
-	orig := args[0]
-	dest := args[1]
+	dest := args[len(args)-1] // last one is always the dest
 
-	cmd := b.Config.Cmd
-	b.Config.Cmd = []string{"/bin/sh", "-c", fmt.Sprintf("#(nop) %s %s in %s", cmdName, orig, dest)}
-	defer func(cmd []string) { b.Config.Cmd = cmd }(cmd)
+	copyInfos := []*copyInfo{}
+
 	b.Config.Image = b.image
 
-	var (
-		origPath   = orig
-		destPath   = dest
-		remoteHash string
-		isRemote   bool
-		decompress = true
-	)
+	defer func() {
+		for _, ci := range copyInfos {
+			if ci.tmpDir != "" {
+				os.RemoveAll(ci.tmpDir)
+			}
+		}
+	}()
 
-	isRemote = utils.IsURL(orig)
-	if isRemote && !allowRemote {
-		return fmt.Errorf("Source can't be an URL for %s", cmdName)
-	} else if utils.IsURL(orig) {
+	// Loop through each src file and calculate the info we need to
+	// do the copy (e.g. hash value if cached).  Don't actually do
+	// the copy until we've looked at all src files
+	for _, orig := range args[0 : len(args)-1] {
+		err := calcCopyInfo(b, cmdName, &copyInfos, orig, dest, allowRemote, allowDecompression)
+		if err != nil {
+			return err
+		}
+	}
+
+	if len(copyInfos) == 0 {
+		return fmt.Errorf("No source files were specified")
+	}
+
+	if len(copyInfos) > 1 && !strings.HasSuffix(dest, "/") {
+		return fmt.Errorf("When using %s with more than one source file, the destination must be a directory and end with a /", cmdName)
+	}
+
+	// For backwards compat, if there's just one CI then use it as the
+	// cache look-up string, otherwise hash 'em all into one
+	var srcHash string
+	var origPaths string
+
+	if len(copyInfos) == 1 {
+		srcHash = copyInfos[0].hash
+		origPaths = copyInfos[0].origPath
+	} else {
+		var hashs []string
+		var origs []string
+		for _, ci := range copyInfos {
+			hashs = append(hashs, ci.hash)
+			origs = append(origs, ci.origPath)
+		}
+		hasher := sha256.New()
+		hasher.Write([]byte(strings.Join(hashs, ",")))
+		srcHash = "multi:" + hex.EncodeToString(hasher.Sum(nil))
+		origPaths = strings.Join(origs, " ")
+	}
+
+	cmd := b.Config.Cmd
+	b.Config.Cmd = []string{"/bin/sh", "-c", fmt.Sprintf("#(nop) %s %s in %s", cmdName, srcHash, dest)}
+	defer func(cmd []string) { b.Config.Cmd = cmd }(cmd)
+
+	hit, err := b.probeCache()
+	if err != nil {
+		return err
+	}
+	// If we do not have at least one hash, never use the cache
+	if hit && b.UtilizeCache {
+		return nil
+	}
+
+	container, _, err := b.Daemon.Create(b.Config, nil, "")
+	if err != nil {
+		return err
+	}
+	b.TmpContainers[container.ID] = struct{}{}
+
+	if err := container.Mount(); err != nil {
+		return err
+	}
+	defer container.Unmount()
+
+	for _, ci := range copyInfos {
+		if err := b.addContext(container, ci.origPath, ci.destPath, ci.decompress); err != nil {
+			return err
+		}
+	}
+
+	if err := b.commit(container.ID, cmd, fmt.Sprintf("%s %s in %s", cmdName, origPaths, dest)); err != nil {
+		return err
+	}
+	return nil
+}
+
+func calcCopyInfo(b *Builder, cmdName string, cInfos *[]*copyInfo, origPath string, destPath string, allowRemote bool, allowDecompression bool) error {
+
+	if origPath != "" && origPath[0] == '/' && len(origPath) > 1 {
+		origPath = origPath[1:]
+	}
+	origPath = strings.TrimPrefix(origPath, "./")
+
+	// In the remote/URL case, download it and gen its hashcode
+	if urlutil.IsURL(origPath) {
+		if !allowRemote {
+			return fmt.Errorf("Source can't be a URL for %s", cmdName)
+		}
+
+		ci := copyInfo{}
+		ci.origPath = origPath
+		ci.hash = origPath // default to this but can change
+		ci.destPath = destPath
+		ci.decompress = false
+		*cInfos = append(*cInfos, &ci)
+
 		// Initiate the download
-		resp, err := utils.Download(orig)
+		resp, err := utils.Download(ci.origPath)
 		if err != nil {
 			return err
 		}
@@ -141,6 +241,7 @@ func (b *Builder) runContextCommand(args []string, allowRemote bool, allowDecomp
 		if err != nil {
 			return err
 		}
+		ci.tmpDir = tmpDirName
 
 		// Create a tmp file within our tmp dir
 		tmpFileName := path.Join(tmpDirName, "tmp")
@@ -148,7 +249,6 @@ func (b *Builder) runContextCommand(args []string, allowRemote bool, allowDecomp
 		if err != nil {
 			return err
 		}
-		defer os.RemoveAll(tmpDirName)
 
 		// Download and dump result to tmp file
 		if _, err := io.Copy(tmpFile, utils.ProgressReader(resp.Body, int(resp.ContentLength), b.OutOld, b.StreamFormatter, true, "", "Downloading")); err != nil {
@@ -158,28 +258,29 @@ func (b *Builder) runContextCommand(args []string, allowRemote bool, allowDecomp
 		fmt.Fprintf(b.OutStream, "\n")
 		tmpFile.Close()
 
-		// Remove the mtime of the newly created tmp file
-		if err := system.UtimesNano(tmpFileName, make([]syscall.Timespec, 2)); err != nil {
+		// Set the mtime to the Last-Modified header value if present
+		// Otherwise just remove atime and mtime
+		times := make([]syscall.Timespec, 2)
+
+		lastMod := resp.Header.Get("Last-Modified")
+		if lastMod != "" {
+			mTime, err := http.ParseTime(lastMod)
+			// If we can't parse it then just let it default to 'zero'
+			// otherwise use the parsed time value
+			if err == nil {
+				times[1] = syscall.NsecToTimespec(mTime.UnixNano())
+			}
+		}
+
+		if err := system.UtimesNano(tmpFileName, times); err != nil {
 			return err
 		}
 
-		origPath = path.Join(filepath.Base(tmpDirName), filepath.Base(tmpFileName))
-
-		// Process the checksum
-		r, err := archive.Tar(tmpFileName, archive.Uncompressed)
-		if err != nil {
-			return err
-		}
-		tarSum := &tarsum.TarSum{Reader: r, DisableCompression: true}
-		if _, err := io.Copy(ioutil.Discard, tarSum); err != nil {
-			return err
-		}
-		remoteHash = tarSum.Sum(nil)
-		r.Close()
+		ci.origPath = path.Join(filepath.Base(tmpDirName), filepath.Base(tmpFileName))
 
 		// If the destination is a directory, figure out the filename.
-		if strings.HasSuffix(dest, "/") {
-			u, err := url.Parse(orig)
+		if strings.HasSuffix(ci.destPath, "/") {
+			u, err := url.Parse(origPath)
 			if err != nil {
 				return err
 			}
@@ -192,85 +293,120 @@ func (b *Builder) runContextCommand(args []string, allowRemote bool, allowDecomp
 			if filename == "" {
 				return fmt.Errorf("cannot determine filename from url: %s", u)
 			}
-			destPath = dest + filename
+			ci.destPath = ci.destPath + filename
 		}
+
+		// Calc the checksum, only if we're using the cache
+		if b.UtilizeCache {
+			r, err := archive.Tar(tmpFileName, archive.Uncompressed)
+			if err != nil {
+				return err
+			}
+			tarSum, err := tarsum.NewTarSum(r, true, tarsum.Version0)
+			if err != nil {
+				return err
+			}
+			if _, err := io.Copy(ioutil.Discard, tarSum); err != nil {
+				return err
+			}
+			ci.hash = tarSum.Sum(nil)
+			r.Close()
+		}
+
+		return nil
 	}
+
+	// Deal with wildcards
+	if ContainsWildcards(origPath) {
+		for _, fileInfo := range b.context.GetSums() {
+			if fileInfo.Name() == "" {
+				continue
+			}
+			match, _ := path.Match(origPath, fileInfo.Name())
+			if !match {
+				continue
+			}
+
+			calcCopyInfo(b, cmdName, cInfos, fileInfo.Name(), destPath, allowRemote, allowDecompression)
+		}
+		return nil
+	}
+
+	// Must be a dir or a file
 
 	if err := b.checkPathForAddition(origPath); err != nil {
 		return err
 	}
+	fi, _ := os.Stat(path.Join(b.contextPath, origPath))
 
-	// Hash path and check the cache
-	if b.UtilizeCache {
-		var (
-			hash string
-			sums = b.context.GetSums()
-		)
+	ci := copyInfo{}
+	ci.origPath = origPath
+	ci.hash = origPath
+	ci.destPath = destPath
+	ci.decompress = allowDecompression
+	*cInfos = append(*cInfos, &ci)
 
-		if remoteHash != "" {
-			hash = remoteHash
-		} else if fi, err := os.Stat(path.Join(b.contextPath, origPath)); err != nil {
-			return err
-		} else if fi.IsDir() {
-			var subfiles []string
-			for file, sum := range sums {
-				absFile := path.Join(b.contextPath, file)
-				absOrigPath := path.Join(b.contextPath, origPath)
-				if strings.HasPrefix(absFile, absOrigPath) {
-					subfiles = append(subfiles, sum)
-				}
-			}
-			sort.Strings(subfiles)
-			hasher := sha256.New()
-			hasher.Write([]byte(strings.Join(subfiles, ",")))
-			hash = "dir:" + hex.EncodeToString(hasher.Sum(nil))
-		} else {
-			if origPath[0] == '/' && len(origPath) > 1 {
-				origPath = origPath[1:]
-			}
-			origPath = strings.TrimPrefix(origPath, "./")
-			if h, ok := sums[origPath]; ok {
-				hash = "file:" + h
-			}
+	// If not using cache don't need to do anything else.
+	// If we are using a cache then calc the hash for the src file/dir
+	if !b.UtilizeCache {
+		return nil
+	}
+
+	// Deal with the single file case
+	if !fi.IsDir() {
+		// This will match first file in sums of the archive
+		fis := b.context.GetSums().GetFile(ci.origPath)
+		if fis != nil {
+			ci.hash = "file:" + fis.Sum()
 		}
-		b.Config.Cmd = []string{"/bin/sh", "-c", fmt.Sprintf("#(nop) %s %s in %s", cmdName, hash, dest)}
-		hit, err := b.probeCache()
-		if err != nil {
-			return err
+		return nil
+	}
+
+	// Must be a dir
+	var subfiles []string
+	absOrigPath := path.Join(b.contextPath, ci.origPath)
+
+	// Add a trailing / to make sure we only pick up nested files under
+	// the dir and not sibling files of the dir that just happen to
+	// start with the same chars
+	if !strings.HasSuffix(absOrigPath, "/") {
+		absOrigPath += "/"
+	}
+
+	// Need path w/o / too to find matching dir w/o trailing /
+	absOrigPathNoSlash := absOrigPath[:len(absOrigPath)-1]
+
+	for _, fileInfo := range b.context.GetSums() {
+		absFile := path.Join(b.contextPath, fileInfo.Name())
+		if strings.HasPrefix(absFile, absOrigPath) || absFile == absOrigPathNoSlash {
+			subfiles = append(subfiles, fileInfo.Sum())
 		}
-		// If we do not have a hash, never use the cache
-		if hit && hash != "" {
-			return nil
-		}
 	}
+	sort.Strings(subfiles)
+	hasher := sha256.New()
+	hasher.Write([]byte(strings.Join(subfiles, ",")))
+	ci.hash = "dir:" + hex.EncodeToString(hasher.Sum(nil))
 
-	// Create the container
-	container, _, err := b.Daemon.Create(b.Config, "")
-	if err != nil {
-		return err
-	}
-	b.TmpContainers[container.ID] = struct{}{}
-
-	if err := container.Mount(); err != nil {
-		return err
-	}
-	defer container.Unmount()
-
-	if !allowDecompression || isRemote {
-		decompress = false
-	}
-	if err := b.addContext(container, origPath, destPath, decompress); err != nil {
-		return err
-	}
-
-	if err := b.commit(container.ID, cmd, fmt.Sprintf("%s %s in %s", cmdName, orig, dest)); err != nil {
-		return err
-	}
 	return nil
+}
+
+func ContainsWildcards(name string) bool {
+	for i := 0; i < len(name); i++ {
+		ch := name[i]
+		if ch == '\\' {
+			i++
+		} else if ch == '*' || ch == '?' || ch == '[' {
+			return true
+		}
+	}
+	return false
 }
 
 func (b *Builder) pullImage(name string) (*imagepkg.Image, error) {
 	remote, tag := parsers.ParseRepositoryTag(name)
+	if tag == "" {
+		tag = "latest"
+	}
 	pullRegistryAuth := b.AuthConfig
 	if len(b.AuthConfigFile.Configs) > 0 {
 		// The request came with a full auth config file, we prefer to use that
@@ -317,29 +453,26 @@ func (b *Builder) processImageFrom(img *imagepkg.Image) error {
 	onBuildTriggers := b.Config.OnBuild
 	b.Config.OnBuild = []string{}
 
-	// FIXME rewrite this so that builder/parser is used; right now steps in
-	// onbuild are muted because we have no good way to represent the step
-	// number
-	for _, step := range onBuildTriggers {
-		splitStep := strings.Split(step, " ")
-		stepInstruction := strings.ToUpper(strings.Trim(splitStep[0], " "))
-		switch stepInstruction {
-		case "ONBUILD":
-			return fmt.Errorf("Source image contains forbidden chained `ONBUILD ONBUILD` trigger: %s", step)
-		case "MAINTAINER", "FROM":
-			return fmt.Errorf("Source image contains forbidden %s trigger: %s", stepInstruction, step)
+	// parse the ONBUILD triggers by invoking the parser
+	for stepN, step := range onBuildTriggers {
+		ast, err := parser.Parse(strings.NewReader(step))
+		if err != nil {
+			return err
 		}
 
-		// FIXME we have to run the evaluator manually here. This does not belong
-		// in this function. Once removed, the init() in evaluator.go should no
-		// longer be necessary.
+		for i, n := range ast.Children {
+			switch strings.ToUpper(n.Value) {
+			case "ONBUILD":
+				return fmt.Errorf("Chaining ONBUILD via `ONBUILD ONBUILD` isn't allowed")
+			case "MAINTAINER", "FROM":
+				return fmt.Errorf("%s isn't allowed as an ONBUILD trigger", n.Value)
+			}
 
-		if f, ok := evaluateTable[strings.ToLower(stepInstruction)]; ok {
-			if err := f(b, splitStep[1:], nil); err != nil {
+			fmt.Fprintf(b.OutStream, "Trigger %d, %s\n", stepN, step)
+
+			if err := b.dispatch(i, n); err != nil {
 				return err
 			}
-		} else {
-			return fmt.Errorf("%s doesn't appear to be a valid Dockerfile instruction", splitStep[0])
 		}
 	}
 
@@ -373,42 +506,41 @@ func (b *Builder) create() (*daemon.Container, error) {
 	}
 	b.Config.Image = b.image
 
+	config := *b.Config
+
 	// Create the container
-	c, _, err := b.Daemon.Create(b.Config, "")
+	c, warnings, err := b.Daemon.Create(b.Config, nil, "")
 	if err != nil {
 		return nil, err
+	}
+	for _, warning := range warnings {
+		fmt.Fprintf(b.OutStream, " ---> [Warning] %s\n", warning)
 	}
 
 	b.TmpContainers[c.ID] = struct{}{}
 	fmt.Fprintf(b.OutStream, " ---> Running in %s\n", utils.TruncateID(c.ID))
 
 	// override the entry point that may have been picked up from the base image
-	c.Path = b.Config.Cmd[0]
-	c.Args = b.Config.Cmd[1:]
+	c.Path = config.Cmd[0]
+	c.Args = config.Cmd[1:]
 
 	return c, nil
 }
 
 func (b *Builder) run(c *daemon.Container) error {
-	var errCh chan error
-	if b.Verbose {
-		errCh = utils.Go(func() error {
-			// FIXME: call the 'attach' job so that daemon.Attach can be made private
-			//
-			// FIXME (LK4D4): Also, maybe makes sense to call "logs" job, it is like attach
-			// but without hijacking for stdin. Also, with attach there can be race
-			// condition because of some output already was printed before it.
-			return <-b.Daemon.Attach(c, nil, nil, b.OutStream, b.ErrStream)
-		})
-	}
-
 	//start the container
 	if err := c.Start(); err != nil {
 		return err
 	}
 
-	if errCh != nil {
-		if err := <-errCh; err != nil {
+	if b.Verbose {
+		logsJob := b.Engine.Job("logs", c.ID)
+		logsJob.Setenv("follow", "1")
+		logsJob.Setenv("stdout", "1")
+		logsJob.Setenv("stderr", "1")
+		logsJob.Stdout.Add(b.OutStream)
+		logsJob.Stderr.Add(b.ErrStream)
+		if err := logsJob.Run(); err != nil {
 			return err
 		}
 	}
@@ -498,7 +630,7 @@ func (b *Builder) addContext(container *daemon.Container, orig, dest string, dec
 		}
 
 		// try to successfully untar the orig
-		if err := archive.UntarPath(origPath, tarDest); err == nil {
+		if err := chrootarchive.UntarPath(origPath, tarDest); err == nil {
 			return nil
 		} else if err != io.EOF {
 			log.Debugf("Couldn't untar %s to %s: %s", origPath, tarDest, err)
@@ -508,7 +640,7 @@ func (b *Builder) addContext(container *daemon.Container, orig, dest string, dec
 	if err := os.MkdirAll(path.Dir(destPath), 0755); err != nil {
 		return err
 	}
-	if err := archive.CopyWithTar(origPath, destPath); err != nil {
+	if err := chrootarchive.CopyWithTar(origPath, destPath); err != nil {
 		return err
 	}
 
@@ -521,7 +653,7 @@ func (b *Builder) addContext(container *daemon.Container, orig, dest string, dec
 }
 
 func copyAsDirectory(source, destination string, destinationExists bool) error {
-	if err := archive.CopyWithTar(source, destination); err != nil {
+	if err := chrootarchive.CopyWithTar(source, destination); err != nil {
 		return err
 	}
 
@@ -556,9 +688,10 @@ func (b *Builder) clearTmp() {
 		tmp := b.Daemon.Get(c)
 		if err := b.Daemon.Destroy(tmp); err != nil {
 			fmt.Fprintf(b.OutStream, "Error removing intermediate container %s: %s\n", utils.TruncateID(c), err.Error())
-		} else {
-			delete(b.TmpContainers, c)
-			fmt.Fprintf(b.OutStream, "Removing intermediate container %s\n", utils.TruncateID(c))
+			return
 		}
+		b.Daemon.DeleteVolumes(tmp.VolumePaths())
+		delete(b.TmpContainers, c)
+		fmt.Fprintf(b.OutStream, "Removing intermediate container %s\n", utils.TruncateID(c))
 	}
 }

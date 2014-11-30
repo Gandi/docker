@@ -3,6 +3,8 @@ package main
 import (
 	"fmt"
 	"os/exec"
+	"reflect"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -11,51 +13,15 @@ import (
 func TestImagesEnsureImageIsListed(t *testing.T) {
 	imagesCmd := exec.Command(dockerBinary, "images")
 	out, _, err := runCommandWithOutput(imagesCmd)
-	errorOut(err, t, fmt.Sprintf("listing images failed with errors: %v", err))
+	if err != nil {
+		t.Fatalf("listing images failed with errors: %s, %v", out, err)
+	}
 
 	if !strings.Contains(out, "busybox") {
 		t.Fatal("images should've listed busybox")
 	}
 
 	logDone("images - busybox should be listed")
-}
-
-func TestCLIImageTagRemove(t *testing.T) {
-	imagesBefore, _, _ := cmd(t, "images", "-a")
-	cmd(t, "tag", "busybox", "utest:tag1")
-	cmd(t, "tag", "busybox", "utest/docker:tag2")
-	cmd(t, "tag", "busybox", "utest:5000/docker:tag3")
-	{
-		imagesAfter, _, _ := cmd(t, "images", "-a")
-		if nLines(imagesAfter) != nLines(imagesBefore)+3 {
-			t.Fatalf("before: %q\n\nafter: %q\n", imagesBefore, imagesAfter)
-		}
-	}
-	cmd(t, "rmi", "utest/docker:tag2")
-	{
-		imagesAfter, _, _ := cmd(t, "images", "-a")
-		if nLines(imagesAfter) != nLines(imagesBefore)+2 {
-			t.Fatalf("before: %q\n\nafter: %q\n", imagesBefore, imagesAfter)
-		}
-
-	}
-	cmd(t, "rmi", "utest:5000/docker:tag3")
-	{
-		imagesAfter, _, _ := cmd(t, "images", "-a")
-		if nLines(imagesAfter) != nLines(imagesBefore)+1 {
-			t.Fatalf("before: %q\n\nafter: %q\n", imagesBefore, imagesAfter)
-		}
-
-	}
-	cmd(t, "rmi", "utest:tag1")
-	{
-		imagesAfter, _, _ := cmd(t, "images", "-a")
-		if nLines(imagesAfter) != nLines(imagesBefore)+0 {
-			t.Fatalf("before: %q\n\nafter: %q\n", imagesBefore, imagesAfter)
-		}
-
-	}
-	logDone("tag,rmi- tagging the same images multiple times then removing tags")
 }
 
 func TestImagesOrderedByCreationDate(t *testing.T) {
@@ -84,7 +50,9 @@ func TestImagesOrderedByCreationDate(t *testing.T) {
 	}
 
 	out, _, err := runCommandWithOutput(exec.Command(dockerBinary, "images", "-q", "--no-trunc"))
-	errorOut(err, t, fmt.Sprintf("listing images failed with errors: %v", err))
+	if err != nil {
+		t.Fatalf("listing images failed with errors: %s, %v", out, err)
+	}
 	imgs := strings.Split(out, "\n")
 	if imgs[0] != id3 {
 		t.Fatalf("First image must be %s, got %s", id3, imgs[0])
@@ -97,4 +65,60 @@ func TestImagesOrderedByCreationDate(t *testing.T) {
 	}
 
 	logDone("images - ordering by creation date")
+}
+
+func TestImagesErrorWithInvalidFilterNameTest(t *testing.T) {
+	imagesCmd := exec.Command(dockerBinary, "images", "-f", "FOO=123")
+	out, _, err := runCommandWithOutput(imagesCmd)
+	if !strings.Contains(out, "Invalid filter") {
+		t.Fatalf("error should occur when listing images with invalid filter name FOO, %s, %v", out, err)
+	}
+
+	logDone("images - invalid filter name check working")
+}
+
+func TestImagesFilterWhiteSpaceTrimmingAndLowerCasingWorking(t *testing.T) {
+	imageName := "images_filter_test"
+	defer deleteAllContainers()
+	defer deleteImages(imageName)
+	buildImage(imageName,
+		`FROM scratch
+		 RUN touch /test/foo
+		 RUN touch /test/bar
+		 RUN touch /test/baz`, true)
+
+	filters := []string{
+		"dangling=true",
+		"Dangling=true",
+		" dangling=true",
+		"dangling=true ",
+		"dangling = true",
+	}
+
+	imageListings := make([][]string, 5, 5)
+	for idx, filter := range filters {
+		cmd := exec.Command(dockerBinary, "images", "-f", filter)
+		out, _, err := runCommandWithOutput(cmd)
+		if err != nil {
+			t.Fatal(err)
+		}
+		listing := strings.Split(out, "\n")
+		sort.Strings(listing)
+		imageListings[idx] = listing
+	}
+
+	for idx, listing := range imageListings {
+		if idx < 4 && !reflect.DeepEqual(listing, imageListings[idx+1]) {
+			for idx, errListing := range imageListings {
+				fmt.Printf("out %d", idx)
+				for _, image := range errListing {
+					fmt.Print(image)
+				}
+				fmt.Print("")
+			}
+			t.Fatalf("All output must be the same")
+		}
+	}
+
+	logDone("images - white space trimming and lower casing")
 }
